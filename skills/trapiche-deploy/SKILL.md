@@ -1,6 +1,8 @@
-| name | description | allowed-tools |
-|------|-------------|---------------|
-| trapiche-deploy | Deploy the current directory as an anonymous static site and return a temporary public URL. Use when asked to "deploy this", "ship it", "get a preview link", "share this project", or "deploy anonymously". | Bash(trapiche *), Bash(curl *), Bash(which *) |
+---
+name: trapiche-deploy
+description: Deploy the current directory as an anonymous static site and return a temporary public URL. Use when asked to "deploy this", "ship it", "get a preview link", "share this project", or "deploy anonymously".
+allowed-tools: Bash(trapiche:*), Bash(curl:*), Bash(which:*)
+---
 
 # Trapiche Deploy
 
