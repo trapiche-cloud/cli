@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-REPO="trapiche/trapiche"
+REPO="trapiche-cloud/cli"
 BIN_NAME="trapiche"
 INSTALL_DIR="/usr/local/bin"
 
