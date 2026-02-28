@@ -30,13 +30,16 @@ echo "  Source   : ${URL}"
 echo "  Target   : ${DEST}"
 echo ""
 
-if ! curl -fsSL "$URL" -o "$DEST"; then
+TMP=$(mktemp)
+if ! curl -fsSL "$URL" -o "$TMP"; then
+  rm -f "$TMP"
   echo "Download failed. Check that the release exists:"
   echo "  https://github.com/${REPO}/releases/latest"
   exit 1
 fi
 
-chmod +x "$DEST"
+chmod +x "$TMP"
+sudo mv "$TMP" "$DEST"
 
 echo "Done! Verify with:"
 echo "  trapiche --help"
