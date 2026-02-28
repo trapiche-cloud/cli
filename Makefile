@@ -1,5 +1,5 @@
 # ── config ────────────────────────────────────────────────────────────────────
-GITHUB_REPO  ?= trapiche/trapiche          # owner/repo on GitHub
+GITHUB_REPO  ?= trapiche-cloud/cli
 VERSION      ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
 BIN          := trapiche
 BUILD_DIR    := dist
