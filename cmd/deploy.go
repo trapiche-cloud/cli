@@ -59,6 +59,8 @@ func newDeployCommand() *cobra.Command {
 }
 
 func runDeploy(dir string) error {
+	fmt.Print(trapicheTitle)
+
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve directory: %w", err)
@@ -72,26 +74,27 @@ func runDeploy(dir string) error {
 		return fmt.Errorf("path is not a directory: %s", absDir)
 	}
 
-	fmt.Print("Compressing... ")
+	sp := newSpinner("Compressing...")
+	sp.Start()
 	archivePath, fileCount, err := createTarGz(absDir)
 	if err != nil {
+		sp.Fail("Compression failed")
 		return err
 	}
 	defer os.Remove(archivePath)
 
-	archiveInfo, err := os.Stat(archivePath)
-	if err != nil {
-		return fmt.Errorf("failed to read archive size: %w", err)
-	}
+	archiveInfo, _ := os.Stat(archivePath)
 	sizeMB := float64(archiveInfo.Size()) / (1024 * 1024)
-	fmt.Printf("done (%.1f MB, %d files)\n", sizeMB, fileCount)
+	sp.Stop(fmt.Sprintf("Compressed  %.1f MB · %d files", sizeMB, fileCount))
 
+	sp2 := newSpinner("Uploading...")
+	sp2.Start()
 	created, err := queueAnonymousDeploy(archivePath)
 	if err != nil {
+		sp2.Fail("Upload failed")
 		return err
 	}
-
-	fmt.Printf("Queued as [%s] - building...\n", created.Name)
+	sp2.Stop(fmt.Sprintf("Uploaded  queued as %s", created.Name))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -266,10 +269,16 @@ func queueAnonymousDeploy(archivePath string) (*deployCreateResponse, error) {
 }
 
 func pollUntilDone(ctx context.Context, deploymentID, defaultURL string) error {
+	fmt.Println("\nBuilding...")
+	fmt.Println(strings.Repeat("─", 40))
+
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	printedLogLen := 0
+	tty := isTerminal()
+	buildFrames := []string{"⠋", "⠙", "⠸", "⠴", "⠇"}
+	frameIdx := 0
 
 	for {
 		status, err := getAnonymousDeployStatus(deploymentID)
@@ -277,6 +286,10 @@ func pollUntilDone(ctx context.Context, deploymentID, defaultURL string) error {
 			return err
 		}
 
+		hadNewLogs := len(status.Logs) > printedLogLen
+		if hadNewLogs && tty {
+			fmt.Printf("\r%s\r", strings.Repeat(" ", 30))
+		}
 		printNewLogs(status.Logs, &printedLogLen)
 
 		switch status.Status {
@@ -285,15 +298,18 @@ func pollUntilDone(ctx context.Context, deploymentID, defaultURL string) error {
 			if finalURL == "" {
 				finalURL = defaultURL
 			}
-
-			fmt.Println("Deployed!")
-			fmt.Println()
-			fmt.Println(finalURL)
-			fmt.Println()
-			fmt.Println("Link expires in 7 days.")
+			if tty {
+				fmt.Printf("\r%s\r", strings.Repeat(" ", 30))
+			}
+			fmt.Printf("\n✓ Deployed!\n\n  %s\n\n  Link expires in 7 days.\n", finalURL)
 			return nil
 		case "failed":
 			return fmt.Errorf("deployment failed")
+		}
+
+		if !hadNewLogs && tty {
+			fmt.Printf("\r%s Waiting...", buildFrames[frameIdx%len(buildFrames)])
+			frameIdx++
 		}
 
 		select {
