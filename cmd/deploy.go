@@ -1,9 +1,8 @@
 package cmd
 
 import (
-	"archive/tar"
+	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,54 +17,72 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var excludedDirs = map[string]struct{}{
-	"node_modules": {},
-	".git":         {},
-	".next":        {},
-	"dist":         {},
-	"out":          {},
-	"build":        {},
-	"coverage":     {},
-}
-
-type deployCreateResponse struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	URL  string `json:"url"`
-}
-
-type deployStatusResponse struct {
+type deploymentResponse struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
+	RepoURL   string `json:"repoURL"`
+	Branch    string `json:"branch"`
 	Status    string `json:"status"`
 	URL       string `json:"url"`
-	ExpiresAt string `json:"expiresAt"`
 	Logs      string `json:"logs"`
+	CreatedAt string `json:"createdAt"`
 }
 
 func newDeployCommand() *cobra.Command {
-	var dir string
+	var (
+		dir      string
+		repo     string
+		branch   string
+		name     string
+		detach   bool
+		forceNew bool
+	)
 
 	command := &cobra.Command{
 		Use:   "deploy",
-		Short: "Deploy a local static project anonymously",
+		Short: "Deploy the current project",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeploy(dir)
+			return runDeploy(deployOptions{
+				dir:      dir,
+				repo:     repo,
+				branch:   branch,
+				name:     name,
+				detach:   detach,
+				forceNew: forceNew,
+			})
 		},
 	}
 
 	command.Flags().StringVar(&dir, "dir", ".", "Directory to deploy")
+	command.Flags().StringVar(&repo, "repo", "", "GitHub repo (owner/name or URL); defaults to git remote origin")
+	command.Flags().StringVar(&branch, "branch", "", "Branch name metadata; defaults to current git branch")
+	command.Flags().StringVar(&name, "name", "", "App name; defaults to repo name")
+	command.Flags().BoolVar(&detach, "detach", false, "Exit after upload without waiting for build")
+	command.Flags().BoolVar(&forceNew, "new", false, "Create a new deployment instead of updating trapiche.json")
 	return command
 }
 
-func runDeploy(dir string) error {
+type deployOptions struct {
+	dir      string
+	repo     string
+	branch   string
+	name     string
+	detach   bool
+	forceNew bool
+}
+
+func runDeploy(opts deployOptions) error {
 	fmt.Print(trapicheTitle)
 
-	absDir, err := filepath.Abs(dir)
+	creds, err := loadCredentials()
+	if err != nil {
+		return err
+	}
+
+	absDir, err := filepath.Abs(opts.dir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve directory: %w", err)
 	}
-
 	info, err := os.Stat(absDir)
 	if err != nil {
 		return fmt.Errorf("failed to read directory: %w", err)
@@ -73,6 +90,38 @@ func runDeploy(dir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("path is not a directory: %s", absDir)
 	}
+
+	repoURL := strings.TrimSpace(opts.repo)
+	if repoURL == "" {
+		repoURL, err = gitOriginRemote()
+		if err != nil {
+			return err
+		}
+	} else {
+		repoURL, err = normalizeRepoArg(repoURL)
+		if err != nil {
+			return err
+		}
+	}
+
+	branch := strings.TrimSpace(opts.branch)
+	if branch == "" {
+		branch, err = gitCurrentBranch()
+		if err != nil {
+			return err
+		}
+	}
+
+	appName := strings.TrimSpace(opts.name)
+	if appName == "" {
+		appName = repoNameFromURL(repoURL)
+	}
+
+	cfg, err := loadProjectConfig(absDir)
+	if err != nil {
+		return err
+	}
+	isUpdate := cfg != nil && !opts.forceNew
 
 	sp := newSpinner("Compressing...")
 	sp.Start()
@@ -89,136 +138,51 @@ func runDeploy(dir string) error {
 
 	sp2 := newSpinner("Uploading...")
 	sp2.Start()
-	created, err := queueAnonymousDeploy(archivePath)
-	if err != nil {
-		sp2.Fail("Upload failed")
-		return err
+
+	var created *deploymentResponse
+	if isUpdate {
+		created, err = queueAuthenticatedDeployUpdate(creds, archivePath, cfg.DeploymentID, repoURL, branch)
+		if err != nil {
+			sp2.Fail("Upload failed")
+			if isHTTPStatus(err, http.StatusNotFound) {
+				return fmt.Errorf("%s\n\n%s", err.Error(), deploymentNotFoundHelp())
+			}
+			return err
+		}
+		sp2.Stop(fmt.Sprintf("Uploaded  redeploying %s", created.Name))
+	} else {
+		created, err = queueAuthenticatedDeploy(creds, archivePath, repoURL, appName, branch)
+		if err != nil {
+			sp2.Fail("Upload failed")
+			return err
+		}
+		sp2.Stop(fmt.Sprintf("Uploaded  queued as %s", created.Name))
+
+		if err := refreshProjectConfig(absDir, created, repoURL, branch); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to write %s: %v\n", projectConfigFile, err)
+		} else if cfg == nil {
+			fmt.Fprintf(os.Stderr, "\nTip: add %s to .gitignore to avoid committing deployment metadata.\n\n", projectConfigFile)
+		}
 	}
-	sp2.Stop(fmt.Sprintf("Uploaded  queued as %s", created.Name))
+
+	if isUpdate {
+		if err := refreshProjectConfig(absDir, created, repoURL, branch); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to update %s: %v\n", projectConfigFile, err)
+		}
+	}
+
+	if opts.detach {
+		fmt.Printf("\n✓ Queued %s\n\n  %s\n\n  Run: trapiche logs %s\n", created.ID, created.URL, created.ID)
+		return nil
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	return pollUntilDone(ctx, created.ID, created.URL)
+	return pollDeploymentUntilDone(ctx, creds, created.ID, created.URL)
 }
 
-func shouldExclude(relPath string, d os.DirEntry) bool {
-	name := d.Name()
-
-	if d.IsDir() {
-		_, excluded := excludedDirs[name]
-		return excluded
-	}
-
-	if name == ".DS_Store" {
-		return true
-	}
-	if strings.HasSuffix(name, ".log") {
-		return true
-	}
-	if name == ".env" || strings.HasPrefix(name, ".env.") {
-		return true
-	}
-
-	_ = relPath
-	return false
-}
-
-func createTarGz(root string) (string, int, error) {
-	tempFile, err := os.CreateTemp("", "trapiche-*.tar.gz")
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to create temp archive: %w", err)
-	}
-
-	gzipWriter := gzip.NewWriter(tempFile)
-	tarWriter := tar.NewWriter(gzipWriter)
-	fileCount := 0
-
-	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if path == root {
-			return nil
-		}
-
-		relPath, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-
-		if shouldExclude(relPath, d) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		if d.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-
-		header, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			_ = file.Close()
-			return err
-		}
-		header.Name = filepath.ToSlash(relPath)
-
-		if err := tarWriter.WriteHeader(header); err != nil {
-			_ = file.Close()
-			return err
-		}
-		if _, err := io.Copy(tarWriter, file); err != nil {
-			_ = file.Close()
-			return err
-		}
-		if err := file.Close(); err != nil {
-			return err
-		}
-
-		fileCount++
-		return nil
-	})
-
-	closeErr := tarWriter.Close()
-	if walkErr == nil && closeErr != nil {
-		walkErr = closeErr
-	}
-	closeErr = gzipWriter.Close()
-	if walkErr == nil && closeErr != nil {
-		walkErr = closeErr
-	}
-	closeErr = tempFile.Close()
-	if walkErr == nil && closeErr != nil {
-		walkErr = closeErr
-	}
-
-	if walkErr != nil {
-		_ = os.Remove(tempFile.Name())
-		return "", 0, fmt.Errorf("failed to create archive: %w", walkErr)
-	}
-
-	return tempFile.Name(), fileCount, nil
-}
-
-func queueAnonymousDeploy(archivePath string) (*deployCreateResponse, error) {
+func queueAuthenticatedDeploy(creds *credentials, archivePath, repoURL, appName, branch string) (*deploymentResponse, error) {
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open archive: %w", err)
@@ -227,6 +191,16 @@ func queueAnonymousDeploy(archivePath string) (*deployCreateResponse, error) {
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+
+	if err := writer.WriteField("repoURL", repoURL); err != nil {
+		return nil, err
+	}
+	if err := writer.WriteField("appName", appName); err != nil {
+		return nil, err
+	}
+	if err := writer.WriteField("branch", branch); err != nil {
+		return nil, err
+	}
 
 	part, err := writer.CreateFormFile("archive", filepath.Base(archivePath))
 	if err != nil {
@@ -239,9 +213,9 @@ func queueAnonymousDeploy(archivePath string) (*deployCreateResponse, error) {
 		return nil, fmt.Errorf("failed to finalize multipart body: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, apiPath("/api/anonymous/deploy"), &body)
+	req, err := authRequest(creds, http.MethodPost, apiPath("/api/deployments/upload"), bytes.NewReader(body.Bytes()))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -254,102 +228,159 @@ func queueAnonymousDeploy(archivePath string) (*deployCreateResponse, error) {
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusAccepted {
-		return nil, fmt.Errorf("deploy request failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return nil, apiError(resp.StatusCode, respBody)
 	}
 
-	var created deployCreateResponse
+	var created deploymentResponse
 	if err := json.Unmarshal(respBody, &created); err != nil {
 		return nil, fmt.Errorf("failed to parse deploy response: %w", err)
 	}
 	if created.ID == "" {
 		return nil, fmt.Errorf("deploy response missing deployment id")
 	}
-
 	return &created, nil
 }
 
-func pollUntilDone(ctx context.Context, deploymentID, defaultURL string) error {
-	fmt.Println("\nBuilding...")
-	fmt.Println(strings.Repeat("─", 40))
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	printedLogLen := 0
-	tty := isTerminal()
-	buildFrames := []string{"⠋", "⠙", "⠸", "⠴", "⠇"}
-	frameIdx := 0
-
-	for {
-		status, err := getAnonymousDeployStatus(deploymentID)
-		if err != nil {
-			return err
-		}
-
-		hadNewLogs := len(status.Logs) > printedLogLen
-		if hadNewLogs && tty {
-			fmt.Printf("\r%s\r", strings.Repeat(" ", 30))
-		}
-		printNewLogs(status.Logs, &printedLogLen)
-
-		switch status.Status {
-		case "deployed":
-			finalURL := status.URL
-			if finalURL == "" {
-				finalURL = defaultURL
-			}
-			if tty {
-				fmt.Printf("\r%s\r", strings.Repeat(" ", 30))
-			}
-			fmt.Printf("\n✓ Deployed!\n\n  %s\n\n  Link expires in 7 days.\n", finalURL)
-			return nil
-		case "failed":
-			return fmt.Errorf("deployment failed")
-		}
-
-		if !hadNewLogs && tty {
-			fmt.Printf("\r%s Waiting...", buildFrames[frameIdx%len(buildFrames)])
-			frameIdx++
-		}
-
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("deployment timed out after 10 minutes")
-		case <-ticker.C:
-		}
-	}
-}
-
-func getAnonymousDeployStatus(deploymentID string) (*deployStatusResponse, error) {
-	url := apiPath("/api/anonymous/deploy/" + deploymentID)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
+func queueAuthenticatedDeployUpdate(creds *credentials, archivePath, deploymentID, repoURL, branch string) (*deploymentResponse, error) {
+	file, err := os.Open(archivePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to poll deployment status: %w", err)
+		return nil, fmt.Errorf("failed to open archive: %w", err)
+	}
+	defer file.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	if err := writer.WriteField("repoURL", repoURL); err != nil {
+		return nil, err
+	}
+	if err := writer.WriteField("branch", branch); err != nil {
+		return nil, err
+	}
+
+	part, err := writer.CreateFormFile("archive", filepath.Base(archivePath))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create multipart field: %w", err)
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return nil, fmt.Errorf("failed to attach archive: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("failed to finalize multipart body: %w", err)
+	}
+
+	path := fmt.Sprintf("/api/deployments/%s/upload", deploymentID)
+	req, err := authRequest(creds, http.MethodPost, apiPath(path), bytes.NewReader(body.Bytes()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{Timeout: 2 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to upload archive: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status request failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusAccepted {
+		return nil, apiError(resp.StatusCode, respBody)
 	}
 
-	var status deployStatusResponse
-	if err := json.Unmarshal(body, &status); err != nil {
-		return nil, fmt.Errorf("failed to parse status response: %w", err)
+	var updated deploymentResponse
+	if err := json.Unmarshal(respBody, &updated); err != nil {
+		return nil, fmt.Errorf("failed to parse deploy response: %w", err)
 	}
-	return &status, nil
+	if updated.ID == "" {
+		updated.ID = deploymentID
+	}
+	return &updated, nil
 }
 
-func printNewLogs(allLogs string, printedLogLen *int) {
-	if len(allLogs) > *printedLogLen {
-		fmt.Print(allLogs[*printedLogLen:])
-		*printedLogLen = len(allLogs)
-		return
+func pollDeploymentUntilDone(ctx context.Context, creds *credentials, deploymentID, defaultURL string) error {
+	fmt.Println("\nBuilding...")
+	fmt.Println(strings.Repeat("─", 40))
+
+	if err := streamDeploymentLogs(ctx, creds, deploymentID, false); err != nil {
+		return err
 	}
 
-	if len(allLogs) < *printedLogLen {
-		fmt.Print(allLogs)
-		*printedLogLen = len(allLogs)
+	dep, err := getDeployment(creds, deploymentID)
+	if err != nil {
+		return err
 	}
+
+	switch dep.Status {
+	case "deployed":
+		finalURL := dep.URL
+		if finalURL == "" {
+			finalURL = defaultURL
+		}
+		fmt.Printf("\n✓ Deployed!\n\n  %s\n", finalURL)
+		return nil
+	case "failed":
+		return fmt.Errorf("deployment failed")
+	default:
+		return fmt.Errorf("deployment ended with status: %s", dep.Status)
+	}
+}
+
+func getDeployment(creds *credentials, id string) (*deploymentResponse, error) {
+	body, status, err := apiGet(creds, "/api/deployments/"+id)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, apiError(status, body)
+	}
+	var dep deploymentResponse
+	if err := json.Unmarshal(body, &dep); err != nil {
+		return nil, err
+	}
+	return &dep, nil
+}
+
+func streamDeploymentLogs(ctx context.Context, creds *credentials, deploymentID string, noFollow bool) error {
+	url := apiPath("/api/deployments/" + deploymentID + "/logs/stream")
+	req, err := authRequest(creds, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+
+	client := &http.Client{Timeout: 0}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to stream logs: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return apiError(resp.StatusCode, body)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out")
+		default:
+		}
+
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: close") {
+			return nil
+		}
+		if strings.HasPrefix(line, "data: ") {
+			fmt.Println(strings.TrimPrefix(line, "data: "))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if noFollow {
+		return nil
+	}
+	return nil
 }

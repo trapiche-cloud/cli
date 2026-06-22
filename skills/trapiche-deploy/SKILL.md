@@ -1,106 +1,106 @@
 ---
 name: trapiche-deploy
-description: Deploy the current directory as an anonymous static site and return a temporary public URL. Use when asked to "deploy this", "ship it", "get a preview link", "share this project", or "deploy anonymously".
+description: Deploy the current directory to Trapiche and return a live URL. Use when asked to "deploy this", "ship it", "get a preview link", or "deploy to production".
 allowed-tools: Bash(trapiche:*), Bash(curl:*), Bash(which:*)
 ---
 
 # Trapiche Deploy
 
-Deploy the current project as an anonymous static site and return a live URL — no account or GitHub required.
+Deploy the current project to Trapiche and return a live URL.
+
+## Prerequisites
+
+- User must be logged in: `trapiche auth login`
+- Project must be a **static** site (Next.js with `output: 'export'`, Vite, Astro static, CRA, etc.)
 
 ## Setup
-
-Only the **Target Directory** is required. Everything else has sensible defaults.
 
 | Parameter | Default | Example override |
 |-----------|---------|------------------|
 | **Target directory** | Current directory (`.`) | `--dir ./frontend` |
+| **Repository** | `git remote origin` | `--repo owner/repo` |
+| **Branch metadata** | Current git branch | `--branch main` |
+| **App name** | Repo name | `--name my-app` |
 | **API endpoint** | `https://api.trapiche.cloud` | `--api http://localhost:8080` |
-
-If the user says "deploy this" or "ship it", start immediately with defaults. Do not ask clarifying questions unless a specific subdirectory is mentioned.
 
 ## Workflow
 
 ```
 1. Check     Verify trapiche CLI is installed
 2. Install   Install CLI if missing (one-liner)
-3. Deploy    Run trapiche deploy
-4. Return    Share the live URL with the user
+3. Auth      Ensure user is logged in
+4. Deploy    Run trapiche deploy
+5. Return    Share the live URL with the user
 ```
 
 ### 1. Check
-
-Verify the CLI is available:
 
 ```bash
 which trapiche
 ```
 
-If the command is found, skip to step 3. If not found, proceed to step 2.
-
 ### 2. Install
-
-Install the CLI with the official install script:
 
 ```bash
 curl -fsSL https://trapiche.cloud/install.sh | bash
 ```
 
-After installation, verify it works:
+### 3. Auth
 
 ```bash
-trapiche --help
+trapiche auth status || trapiche auth login
 ```
 
-If installation fails, tell the user and stop. Do not attempt to deploy without the CLI.
+If not logged in, `trapiche auth login` opens the browser. Wait for it to complete.
 
-### 3. Deploy
-
-Run the deploy command from the target directory:
+### 4. Deploy
 
 ```bash
 trapiche deploy
 ```
 
-Or with a specific subdirectory:
+Or with options:
 
 ```bash
-trapiche deploy --dir {DIR}
+trapiche deploy --dir {DIR} --repo owner/repo --detach
 ```
 
-The command will:
-- Compress the project (excluding `node_modules`, `.git`, `.env`, build output)
-- Upload the archive to Trapiche
-- Run `npm install` and `npm run build` on the server
-- Return a live URL
+Wait for the command to complete unless `--detach` was used.
 
-Wait for the command to complete. It may take 1–3 minutes depending on project size and dependencies. Do not interrupt it.
+### 5. Return
 
-### 4. Return
-
-Once deployed, capture the URL from the output (looks like `https://{name}.trapiche.site`) and share it with the user:
+Share the URL from the output:
 
 ```
 ✓ Deployed!
 
-https://brave-wolf-4821.trapiche.site
-
-Link expires in 7 days.
+https://my-app-brave-wolf.trapiche.site
 ```
 
-Tell the user the link is live and temporary — it expires in 7 days.
+## Other commands
+
+```bash
+trapiche deployments list
+trapiche logs              # latest deploy for current repo
+trapiche logs dep_abc123   # specific deployment
+trapiche link dep_abc123   # link project to existing deployment
+trapiche unlink            # remove trapiche.json
+trapiche deploy --new      # force a new deployment
+```
+
+## Redeploy
+
+After the first deploy, the CLI writes `trapiche.json` in the project directory (or `--dir` root). Subsequent `trapiche deploy` calls update that deployment in place — same URL, no new deployment slot.
+
+- `trapiche deploy --new` — create a fresh deployment and overwrite `trapiche.json`
+- `trapiche link dep_xxx` — recover linking to an existing deployment
+- `trapiche unlink` — remove `trapiche.json` if the link is stale
+
+Add `trapiche.json` to `.gitignore` if you do not want deployment metadata in git.
 
 ## Guidance
 
-- **Only static sites are supported.** The project must have a `package.json` with a `build` script. Next.js apps must use `output: 'export'` in `next.config.js`.
-
-- **Never deploy sensitive directories.** The CLI automatically excludes `.env` files, but confirm there are no hardcoded secrets in the source before deploying.
-
-- **If the build fails**, read the logs printed by the CLI and report the error to the user. Common causes:
-  - Missing `build` script in `package.json`
-  - Next.js not configured for static export
-  - Build dependencies missing
-
-- **If the URL is already needed urgently**, tell the user the deploy is queued and they can check status via the URL pattern while waiting.
-
-- **One deploy at a time.** The CLI is anonymous and rate-limited to 3 deploys per hour per IP. If rate-limited (429 error), tell the user to wait before retrying.
+- Auth is required — anonymous deploy is not supported.
+- Only static sites are supported via CLI upload.
+- The CLI uploads local source; GitHub is metadata only (repo linking), not used to fetch code.
+- If build fails, read the logs printed by the CLI and report the error.

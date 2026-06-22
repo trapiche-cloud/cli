@@ -16,7 +16,12 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.SilenceUsage = true
 	rootCmd.PersistentFlags().StringVar(&apiBase, "api", "https://api.trapiche.cloud", "Trapiche API base URL")
+	rootCmd.AddCommand(newAuthCommand())
 	rootCmd.AddCommand(newDeployCommand())
+	rootCmd.AddCommand(newLinkCommand())
+	rootCmd.AddCommand(newUnlinkCommand())
+	rootCmd.AddCommand(newLogsCommand())
+	rootCmd.AddCommand(newDeploymentsCommand())
 }
 
 func Execute() error {
