@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,9 @@ type credentials struct {
 }
 
 var credentialsPath = defaultCredentialsPath
+
+// errNotLoggedIn means there is no saved token (no file, or an empty token).
+var errNotLoggedIn = errors.New("not logged in — run: trapiche auth login")
 
 func defaultCredentialsPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -47,7 +51,7 @@ func loadCredentialsRaw() (*credentials, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("not logged in — run: trapiche auth login")
+			return nil, errNotLoggedIn
 		}
 		return nil, err
 	}
@@ -57,7 +61,7 @@ func loadCredentialsRaw() (*credentials, error) {
 		return nil, fmt.Errorf("invalid credentials file: %w", err)
 	}
 	if creds.Token == "" {
-		return nil, fmt.Errorf("not logged in — run: trapiche auth login")
+		return nil, errNotLoggedIn
 	}
 	return &creds, nil
 }

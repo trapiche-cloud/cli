@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -78,11 +79,24 @@ func newAuthStatusCommand() *cobra.Command {
 func runAuthLogout(force bool) error {
 	creds, err := loadCredentialsRaw()
 	if err != nil {
-		// No token in the file: nothing to revoke. Remove any stale file.
+		if errors.Is(err, errNotLoggedIn) {
+			// No token in the file: nothing to revoke. Remove any stale file.
+			if clearErr := clearCredentials(); clearErr != nil {
+				return clearErr
+			}
+			fmt.Println("Not logged in.")
+			return nil
+		}
+		// The file exists but cannot be read. The token may be valid on the
+		// server, and this is the only local copy. Keep the file unless forced.
+		if !force {
+			return fmt.Errorf("%w. The credentials file was kept. Fix it, or use --force to remove it", err)
+		}
+		fmt.Fprintf(os.Stderr, "warning: %v. The token may stay valid on the server.\n", err)
 		if clearErr := clearCredentials(); clearErr != nil {
 			return clearErr
 		}
-		fmt.Println("Not logged in.")
+		fmt.Println("Local credentials removed.")
 		return nil
 	}
 

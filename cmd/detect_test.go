@@ -406,8 +406,7 @@ func TestNextStaticExportIgnoresComments(t *testing.T) {
 
 func TestNextStaticExportAllConfigNames(t *testing.T) {
 	for _, name := range []string{
-		"next.config.js", "next.config.mjs", "next.config.cjs",
-		"next.config.ts", "next.config.mts", "next.config.cts",
+		"next.config.js", "next.config.mjs", "next.config.ts", "next.config.mts",
 	} {
 		dir := t.TempDir()
 		writeProjectFile(t, dir, "package.json", `{"dependencies":{"next":"14.0.0"}}`)
@@ -464,6 +463,15 @@ func TestNextOnlyTheLoadedConfigFileCounts(t *testing.T) {
 		{"js loaded, no export; leftover ts has it", withoutExport, withExport, deployTypeSSR},
 		{"js loaded, has export; ts has none", withExport, withoutExport, deployTypeStatic},
 	}
+	t.Run("cjs is not loaded by Next.js", func(t *testing.T) {
+		dir := t.TempDir()
+		writeProjectFile(t, dir, "package.json", `{"dependencies":{"next":"14.0.0"}}`)
+		writeProjectFile(t, dir, "next.config.cjs", withoutExport)
+		writeProjectFile(t, dir, "next.config.ts", withExport)
+		if got, _ := detectDeployType(dir); got != deployTypeStatic {
+			t.Fatalf("got %q, want static", got)
+		}
+	})
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

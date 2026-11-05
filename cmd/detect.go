@@ -108,10 +108,10 @@ func detectDeployType(dir string) (string, string) {
 	return "", ""
 }
 
-// nextConfigNames are the file names that Next.js reads for its configuration.
+// nextConfigNames are the file names that Next.js loads, in load order.
+// Next.js does not load next.config.cjs or next.config.cts.
 var nextConfigNames = []string{
-	"next.config.js", "next.config.mjs", "next.config.cjs",
-	"next.config.ts", "next.config.mts", "next.config.cts",
+	"next.config.js", "next.config.mjs", "next.config.ts", "next.config.mts",
 }
 
 // nextHasStaticExport reports whether the next.config file that Next.js loads

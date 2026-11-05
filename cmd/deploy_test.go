@@ -21,10 +21,12 @@ type fakeEntry struct {
 	isDir bool
 }
 
-func (f fakeEntry) Name() string               { return f.name }
-func (f fakeEntry) IsDir() bool                { return f.isDir }
-func (f fakeEntry) Type() os.FileMode          { return 0 }
-func (f fakeEntry) Info() (os.FileInfo, error) { return fakeFileInfo{name: f.name, isDir: f.isDir}, nil }
+func (f fakeEntry) Name() string      { return f.name }
+func (f fakeEntry) IsDir() bool       { return f.isDir }
+func (f fakeEntry) Type() os.FileMode { return 0 }
+func (f fakeEntry) Info() (os.FileInfo, error) {
+	return fakeFileInfo{name: f.name, isDir: f.isDir}, nil
+}
 
 type fakeFileInfo struct {
 	name  string

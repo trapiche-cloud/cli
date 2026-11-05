@@ -124,8 +124,10 @@ func parseEnvArgs(args []string) ([]envPair, error) {
 }
 
 // parseEnvValue reads the value part of a KEY=VALUE line of a .env file.
-//   - A value in quotes ends at the closing quote. Text after it, such as
-//     a "# comment", is ignored.
+//   - A value in double quotes ends at the first closing quote that has no
+//     backslash before it. The escapes \" \\ \n \r \t are decoded. Text after
+//     the closing quote, such as a "# comment", is ignored.
+//   - A value in single quotes is literal and ends at the next single quote.
 //   - An unquoted value ends at a "#" that follows a space or tab. A "#" with no
 //     space before it stays in the value (for example a URL with #fragment).
 //   - A quote with no closing quote is kept as it is.
@@ -138,9 +140,37 @@ func parseEnvValue(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	if raw[0] == '"' || raw[0] == '\'' {
-		if end := strings.IndexByte(raw[1:], raw[0]); end >= 0 {
+	switch raw[0] {
+	case '\'':
+		if end := strings.IndexByte(raw[1:], '\''); end >= 0 {
 			return raw[1 : 1+end]
+		}
+		return raw
+	case '"':
+		var sb strings.Builder
+		for i := 1; i < len(raw); i++ {
+			c := raw[i]
+			switch {
+			case c == '"':
+				return sb.String()
+			case c == '\\' && i+1 < len(raw):
+				i++
+				switch raw[i] {
+				case '"', '\\':
+					sb.WriteByte(raw[i])
+				case 'n':
+					sb.WriteByte('\n')
+				case 'r':
+					sb.WriteByte('\r')
+				case 't':
+					sb.WriteByte('\t')
+				default: // unknown escape: keep it as written
+					sb.WriteByte('\\')
+					sb.WriteByte(raw[i])
+				}
+			default:
+				sb.WriteByte(c)
+			}
 		}
 		return raw
 	}

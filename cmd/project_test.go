@@ -13,11 +13,11 @@ import (
 func TestProjectConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	dep := &deploymentResponse{
-		ID:     "dep_abc123",
-		Name:   "my-app-wolf",
-		URL:    "https://my-app-wolf.trapiche.site",
+		ID:      "dep_abc123",
+		Name:    "my-app-wolf",
+		URL:     "https://my-app-wolf.trapiche.site",
 		RepoURL: "https://github.com/o/r",
-		Branch: "main",
+		Branch:  "main",
 	}
 
 	if err := refreshProjectConfig(dir, dep, dep.RepoURL, dep.Branch); err != nil {

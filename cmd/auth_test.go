@@ -161,6 +161,30 @@ func TestLogoutWithoutCredentials(t *testing.T) {
 	}
 }
 
+// A credentials file that cannot be parsed may hold a valid token. Logout must
+// keep it unless --force is set.
+func TestLogoutKeepsUnreadableFileUnlessForced(t *testing.T) {
+	orig := credentialsPath
+	defer func() { credentialsPath = orig }()
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	credentialsPath = func() (string, error) { return path, nil }
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runAuthLogout(false); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("expected an error that names --force, got %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("file was removed: %v", err)
+	}
+
+	captureOutput(func() { _ = runAuthLogout(true) })
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file was not removed with --force: %v", err)
+	}
+}
+
 func TestStatusVerifiesToken(t *testing.T) {
 	setupCredsFile(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
