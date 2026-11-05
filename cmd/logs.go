@@ -56,7 +56,8 @@ func newLogsCommand() *cobra.Command {
 // while it builds. So during a build, the log stream is only safe for a known
 // static deployment. For a container, or when the type is not known, the build
 // log comes from the deployment record. This is the same rule as the deploy wait.
-// A finished deployment uses the log stream.
+// A container that failed to build prints the build log of the deployment record.
+// Any other finished deployment uses the log stream.
 func showDeploymentLogs(ctx context.Context, creds *credentials, deploymentID string, noFollow bool) error {
 	dep, err := getDeployment(creds, deploymentID)
 	if err != nil {
@@ -70,6 +71,13 @@ func showDeploymentLogs(ctx context.Context, creds *credentials, deploymentID st
 			return nil
 		}
 		return followBuildLogs(ctx, creds, deploymentID)
+	}
+	// A container that failed to build never started. The log stream has only
+	// runtime logs, so the build failure is in the deployment record.
+	if dep.Status == "failed" && dep.DeploymentType != deployTypeStatic && strings.TrimSpace(dep.Logs) != "" {
+		printed := 0
+		printNewLogs(dep.Logs, &printed)
+		return nil
 	}
 	return streamDeploymentLogs(ctx, creds, deploymentID, noFollow)
 }

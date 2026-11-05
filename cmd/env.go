@@ -68,7 +68,7 @@ Empty values are not allowed. Lines with an empty value in a file are skipped.`,
 			return runEnvSet(dir, deploymentID, file, args)
 		},
 	}
-	set.Flags().StringVar(&file, "file", "", "Read KEY=VALUE lines from a file (for example .env)")
+	set.Flags().StringVar(&file, "file", "", "Read KEY=VALUE lines from a file (for example .env). A relative path is relative to --dir")
 
 	unset := &cobra.Command{
 		Use:   "unset KEY [KEY...]",
@@ -258,6 +258,10 @@ func runEnvList(dir, deploymentFlag string, reveal bool) error {
 func runEnvSet(dir, deploymentFlag, file string, args []string) error {
 	var pairs []envPair
 	if file != "" {
+		// A relative --file is relative to --dir, as trapiche.json is.
+		if !filepath.IsAbs(file) {
+			file = filepath.Join(dir, file)
+		}
 		filePairs, skipped, err := parseEnvFile(file)
 		if err != nil {
 			return err

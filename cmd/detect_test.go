@@ -133,6 +133,10 @@ func TestDockerfilePortWarning(t *testing.T) {
 		{"other port", "FROM node\nEXPOSE 8080\n", true},
 		{"lowercase", "FROM node\nexpose 5000\n", true},
 		{"no expose", "FROM node\nCMD [\"node\",\"x.js\"]\n", false},
+		{"builder 3000, final 80", "FROM node AS build\nEXPOSE 3000\nFROM nginx\nEXPOSE 80\n", true},
+		{"builder 80, final 3000", "FROM node AS build\nEXPOSE 80\nFROM node\nEXPOSE 3000\n", false},
+		{"final stage inherits 3000", "FROM node AS base\nEXPOSE 3000\nFROM base\nCMD [\"x\"]\n", false},
+		{"final stage inherits 8080", "FROM --platform=linux/amd64 node AS Base\nEXPOSE 8080\nFROM base AS run\n", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -482,6 +486,66 @@ func TestNextOnlyTheLoadedConfigFileCounts(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNextConditionalOutputExportIsNotStatic(t *testing.T) {
+	ssrConfigs := []string{
+		"module.exports = {\n  ...(process.env.PAGES ? { output: 'export' } : { output: 'standalone' }),\n}",
+		"module.exports = {\n  ...(process.env.PAGES && { output: 'export' }),\n}",
+		"const config = process.env.PAGES ? { output: 'export' } : {}\nexport default config",
+		"export default { images: { output: 'export' } }",
+	}
+	for _, cfg := range ssrConfigs {
+		dir := t.TempDir()
+		writeProjectFile(t, dir, "package.json", `{"dependencies":{"next":"14.0.0"}}`)
+		writeProjectFile(t, dir, "next.config.js", cfg)
+		if got, _ := detectDeployType(dir); got != deployTypeSSR {
+			t.Fatalf("config %q: got %q, want ssr", cfg, got)
+		}
+	}
+
+	staticConfigs := []string{
+		"module.exports = withBundleAnalyzer({ output: 'export' })",
+		"const nextConfig: NextConfig = {\n  reactStrictMode: true,\n  output: 'export',\n}\nexport default nextConfig",
+		"module.exports = { env: { A: process.env.A ? 'x' : 'y' }, output: 'export' }",
+	}
+	for _, cfg := range staticConfigs {
+		dir := t.TempDir()
+		writeProjectFile(t, dir, "package.json", `{"dependencies":{"next":"14.0.0"}}`)
+		writeProjectFile(t, dir, "next.config.js", cfg)
+		if got, _ := detectDeployType(dir); got != deployTypeStatic {
+			t.Fatalf("config %q: got %q, want static", cfg, got)
+		}
+	}
+}
+
+func TestShowDeploymentLogsFailedContainerPrintsBuildLog(t *testing.T) {
+	creds := &credentials{Token: "trp_testtoken"}
+	for _, noFollow := range []bool{true, false} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/logs/stream") {
+				t.Errorf("runtime log stream must not be used for a container that failed to build")
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(deploymentResponse{
+				ID: "dep_1", DeploymentType: "ssr", Status: "failed", Logs: "step 3 failed: npm ERR!\n",
+			})
+		}))
+		useAPI(t, srv.URL)
+
+		var err error
+		out := captureOutput(func() {
+			err = showDeploymentLogs(context.Background(), creds, "dep_1", noFollow)
+		})
+		srv.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != "step 3 failed: npm ERR!\n" {
+			t.Fatalf("noFollow=%v: out = %q", noFollow, out)
+		}
 	}
 }
 

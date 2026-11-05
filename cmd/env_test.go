@@ -218,6 +218,33 @@ func TestEnvSetListUnsetAgainstAPI(t *testing.T) {
 	}
 }
 
+// A relative --file is read from --dir, not from the working directory.
+func TestEnvSetFileIsRelativeToDir(t *testing.T) {
+	setupCredsFile(t)
+	store := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Key, Value string }
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		store[req.Key] = req.Value
+		_ = json.NewEncoder(w).Encode(map[string]string{"key": req.Key, "value": "***"})
+	}))
+	defer srv.Close()
+	useAPI(t, srv.URL)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("FROM_DIR=yes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	captureOutput(func() { err = runEnvSet(dir, "dep_1", ".env", nil) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store["FROM_DIR"] != "yes" {
+		t.Fatalf("store = %v", store)
+	}
+}
+
 func TestEnvSetStopsOnAPIError(t *testing.T) {
 	setupCredsFile(t)
 	calls := 0

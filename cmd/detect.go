@@ -193,11 +193,43 @@ func tokenizeJS(src string) []jsToken {
 
 // hasOutputExport looks for the token sequence: output : 'export'
 // (the key may be a name or a string, the value must be the string export).
+// It counts only an unconditional property. An object that follows "?", ":",
+// "&" or "|" (a ternary branch, or "cond && {...}") may not be the config that
+// Next.js runs, and static uploads are built with no environment variables. So
+// the CLI does not call such a config static. A wrapper call, as in
+// withPlugin({ output: 'export' }), still counts.
 func hasOutputExport(src string) bool {
 	tokens := tokenizeJS(src)
-	for i := 0; i+2 < len(tokens); i++ {
-		key := tokens[i]
-		if key.text != "output" || (key.kind != tokIdent && key.kind != tokString) {
+	// One entry for each open "{", "(" or "[". The value is true for a "{" that
+	// starts a conditional object.
+	var open []bool
+	conditionalDepth := 0
+	for i, tok := range tokens {
+		if tok.kind == tokPunct {
+			switch tok.text {
+			case "{", "(", "[":
+				conditional := false
+				if tok.text == "{" && i > 0 && tokens[i-1].kind == tokPunct {
+					switch tokens[i-1].text {
+					case "?", ":", "&", "|":
+						conditional = true
+					}
+				}
+				open = append(open, conditional)
+				if conditional {
+					conditionalDepth++
+				}
+			case "}", ")", "]":
+				if n := len(open); n > 0 {
+					if open[n-1] {
+						conditionalDepth--
+					}
+					open = open[:n-1]
+				}
+			}
+			continue
+		}
+		if i+2 >= len(tokens) || tok.text != "output" || conditionalDepth > 0 {
 			continue
 		}
 		if tokens[i+1].kind != tokPunct || tokens[i+1].text != ":" {
@@ -324,7 +356,10 @@ func describeDeployType(chosen, requested, detected, reason string, saved bool) 
 }
 
 // dockerfileExposedPorts returns the numeric ports of the EXPOSE lines of the
-// Dockerfile in dir, and whether a Dockerfile exists. Names such as $PORT are skipped.
+// final stage of the Dockerfile in dir, and whether a Dockerfile exists. Names
+// such as $PORT are skipped. The final image is what runs, so an earlier build
+// stage does not count. A stage that starts FROM an earlier stage keeps the
+// ports of that stage, as Docker does.
 func dockerfileExposedPorts(dir string) (ports []int, found bool) {
 	file, err := os.Open(filepath.Join(dir, "Dockerfile"))
 	if err != nil {
@@ -332,16 +367,42 @@ func dockerfileExposedPorts(dir string) (ports []int, found bool) {
 	}
 	defer file.Close()
 
+	stages := map[string][]int{} // stage name (lower case) -> ports at its end
+	var stageName string
+	finishStage := func() {
+		if stageName != "" {
+			stages[stageName] = ports
+		}
+	}
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 || !strings.EqualFold(fields[0], "EXPOSE") {
+		if len(fields) < 2 {
 			continue
 		}
-		for _, f := range fields[1:] {
-			port, _, _ := strings.Cut(f, "/")
-			if n, err := strconv.Atoi(port); err == nil {
-				ports = append(ports, n)
+		switch strings.ToUpper(fields[0]) {
+		case "FROM":
+			finishStage()
+			// FROM [--platform=x] image [AS name]
+			args := fields[1:]
+			for len(args) > 0 && strings.HasPrefix(args[0], "--") {
+				args = args[1:]
+			}
+			if len(args) == 0 {
+				continue
+			}
+			ports = append([]int(nil), stages[strings.ToLower(args[0])]...)
+			stageName = ""
+			if len(args) >= 3 && strings.EqualFold(args[1], "AS") {
+				stageName = strings.ToLower(args[2])
+			}
+		case "EXPOSE":
+			for _, f := range fields[1:] {
+				port, _, _ := strings.Cut(f, "/")
+				if n, err := strconv.Atoi(port); err == nil {
+					ports = append(ports, n)
+				}
 			}
 		}
 	}
