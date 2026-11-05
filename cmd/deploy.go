@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -152,6 +153,11 @@ func runDeploy(opts deployOptions) error {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
 		}
 	}
+	if deployType == deployTypeSSR {
+		if hint := containerPortHint(absDir); hint != "" {
+			fmt.Fprintf(os.Stderr, "note: %s\n", hint)
+		}
+	}
 
 	sp := newSpinner("Compressing...")
 	sp.Start()
@@ -211,21 +217,38 @@ func runDeploy(opts deployOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	if err := pollDeploymentUntilDone(ctx, creds, created.ID, created.URL, created.DeploymentType); err != nil {
+	final, err := pollDeploymentUntilDone(ctx, creds, created.ID, created.URL, created.DeploymentType)
+	if err != nil {
 		return err
 	}
 
-	// The type may have been unknown at upload time (auto). The deployment is
-	// finished now, so ask again and save the type in trapiche.json if it is known.
-	if created.DeploymentType == "" {
-		fillDeploymentType(creds, created, deployTypeAuto)
-		if created.DeploymentType != "" {
-			if err := refreshProjectConfig(absDir, created, repoURL, branch); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to update %s: %v\n", projectConfigFile, err)
-			}
+	// trapiche.json was written from the upload reply. That reply can have no URL
+	// (a container has none yet) and no type (auto). The deployment is finished
+	// now, so save the URL and type that the server reports.
+	if mergeFinalDeployment(created, final) {
+		if err := refreshProjectConfig(absDir, created, repoURL, branch); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to update %s: %v\n", projectConfigFile, err)
 		}
 	}
 	return nil
+}
+
+// mergeFinalDeployment copies the URL and type of a finished deployment into
+// created. It returns true if created changed. Empty values never replace a known one.
+func mergeFinalDeployment(created, final *deploymentResponse) bool {
+	if created == nil || final == nil {
+		return false
+	}
+	changed := false
+	if final.URL != "" && final.URL != created.URL {
+		created.URL = final.URL
+		changed = true
+	}
+	if final.DeploymentType != "" && final.DeploymentType != created.DeploymentType {
+		created.DeploymentType = final.DeploymentType
+		changed = true
+	}
+	return changed
 }
 
 const (
@@ -389,7 +412,9 @@ func followBuildLogs(ctx context.Context, creds *credentials, deploymentID strin
 	}
 }
 
-func pollDeploymentUntilDone(ctx context.Context, creds *credentials, deploymentID, defaultURL, deployType string) error {
+// pollDeploymentUntilDone waits for the build and prints the log. On success it
+// returns the finished deployment. Its URL is never empty (defaultURL is the fallback).
+func pollDeploymentUntilDone(ctx context.Context, creds *credentials, deploymentID, defaultURL, deployType string) (*deploymentResponse, error) {
 	fmt.Println("\nBuilding...")
 	fmt.Println(strings.Repeat("─", 40))
 
@@ -403,26 +428,25 @@ func pollDeploymentUntilDone(ctx context.Context, creds *credentials, deployment
 		followErr = followBuildLogs(ctx, creds, deploymentID)
 	}
 	if followErr != nil {
-		return followErr
+		return nil, followErr
 	}
 
 	dep, err := getDeployment(creds, deploymentID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	switch dep.Status {
 	case "deployed":
-		finalURL := dep.URL
-		if finalURL == "" {
-			finalURL = defaultURL
+		if dep.URL == "" {
+			dep.URL = defaultURL
 		}
-		fmt.Printf("\n✓ Deployed!\n\n  %s\n", finalURL)
-		return nil
+		fmt.Printf("\n✓ Deployed!\n\n  %s\n", dep.URL)
+		return dep, nil
 	case "failed":
-		return fmt.Errorf("deployment failed")
+		return nil, fmt.Errorf("deployment failed")
 	default:
-		return fmt.Errorf("deployment ended with status: %s", dep.Status)
+		return nil, fmt.Errorf("deployment ended with status: %s", dep.Status)
 	}
 }
 
@@ -441,18 +465,40 @@ func getDeployment(creds *credentials, id string) (*deploymentResponse, error) {
 	return &dep, nil
 }
 
+// noFollowIdle is how long `logs --no-follow` waits for a new line before it exits.
+// The log stream of a running container never ends. So "print the current logs
+// and exit" means: print what arrives, and stop when the stream goes quiet.
+const noFollowIdle = 2 * time.Second
+
 func streamDeploymentLogs(ctx context.Context, creds *credentials, deploymentID string, noFollow bool) error {
 	url := apiPath("/api/deployments/" + deploymentID + "/logs/stream")
 	req, err := authRequest(creds, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
+
+	// resetIdle is set only for --no-follow. It restarts the idle timer on each line.
+	var resetIdle func()
+	if noFollow {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		idle := time.AfterFunc(noFollowIdle, cancel)
+		defer idle.Stop()
+		resetIdle = func() { idle.Reset(noFollowIdle) }
+	}
+	// stoppedByIdle is true when --no-follow ended the stream because it went quiet.
+	stoppedByIdle := func() bool { return noFollow && errors.Is(ctx.Err(), context.Canceled) }
+
 	// Stop the stream when the caller's time limit ends, even if no line arrives.
 	req = req.WithContext(ctx)
 
 	client := &http.Client{Timeout: 0}
 	resp, err := client.Do(req)
 	if err != nil {
+		if stoppedByIdle() {
+			return nil
+		}
 		return fmt.Errorf("failed to stream logs: %w", err)
 	}
 	defer resp.Body.Close()
@@ -464,8 +510,14 @@ func streamDeploymentLogs(ctx context.Context, creds *credentials, deploymentID 
 
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
+		if resetIdle != nil {
+			resetIdle()
+		}
 		select {
 		case <-ctx.Done():
+			if stoppedByIdle() {
+				return nil
+			}
 			return fmt.Errorf("timed out")
 		default:
 		}
@@ -479,10 +531,10 @@ func streamDeploymentLogs(ctx context.Context, creds *credentials, deploymentID 
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		if stoppedByIdle() {
+			return nil
+		}
 		return err
-	}
-	if noFollow {
-		return nil
 	}
 	return nil
 }

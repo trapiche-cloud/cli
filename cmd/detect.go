@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -108,19 +109,85 @@ func detectDeployType(dir string) (string, string) {
 	return "", ""
 }
 
-// nextHasStaticExport reports whether next.config sets output: 'export'.
+// nextConfigNames are the file names that Next.js reads for its configuration.
+var nextConfigNames = []string{
+	"next.config.js", "next.config.mjs", "next.config.cjs",
+	"next.config.ts", "next.config.mts", "next.config.cts",
+}
+
+// staticExportPattern matches output: 'export' (any quote style, any spacing).
+var staticExportPattern = regexp.MustCompile("output\\s*:\\s*['\"`]export['\"`]")
+
+// nextHasStaticExport reports whether a next.config file sets output: 'export'.
+// Comments are removed first, so a line like "// output: 'export'" does not count.
+// The type is saved in trapiche.json and cannot change, so a wrong guess is costly.
 func nextHasStaticExport(dir string) bool {
-	for _, name := range []string{"next.config.js", "next.config.mjs", "next.config.ts"} {
+	for _, name := range nextConfigNames {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			continue
 		}
-		text := string(data)
-		if strings.Contains(text, "output: 'export'") || strings.Contains(text, `output: "export"`) {
+		if staticExportPattern.MatchString(stripJSComments(string(data))) {
 			return true
 		}
 	}
 	return false
+}
+
+// stripJSComments removes // line comments and /* block comments */ from
+// JavaScript or TypeScript source. It keeps text inside string and template
+// literals, so "https://example.com" stays whole. It is not a full parser.
+func stripJSComments(src string) string {
+	var out strings.Builder
+	out.Grow(len(src))
+
+	var quote byte // the quote character of the string that we are in, or 0
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+
+		if quote != 0 {
+			out.WriteByte(c)
+			if c == '\\' && i+1 < len(src) {
+				i++
+				out.WriteByte(src[i])
+			} else if c == quote {
+				quote = 0
+			}
+			continue
+		}
+
+		switch {
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+			out.WriteByte(c)
+		case c == '/' && i+1 < len(src) && src[i+1] == '/':
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			if i < len(src) {
+				out.WriteByte('\n')
+			}
+		case c == '/' && i+1 < len(src) && src[i+1] == '*':
+			i += 2
+			for i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/') {
+				i++
+			}
+			i++ // skip the "/" of the closing "*/"
+			out.WriteByte(' ')
+		default:
+			out.WriteByte(c)
+		}
+	}
+	return out.String()
+}
+
+// containerPortHint reminds the user about the container port when the project
+// has no Dockerfile. The Dockerfile case has its own, more exact warning.
+func containerPortHint(dir string) string {
+	if info, err := os.Stat(filepath.Join(dir, "Dockerfile")); err == nil && !info.IsDir() {
+		return ""
+	}
+	return fmt.Sprintf("a container app must listen on port %d (Trapiche sends traffic to that port).", containerPort)
 }
 
 // resolveDeployType decides which type to send to the API.
