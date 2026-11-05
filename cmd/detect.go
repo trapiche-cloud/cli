@@ -1,0 +1,209 @@
+package cmd
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+const (
+	deployTypeAuto   = "auto"
+	deployTypeStatic = "static"
+	deployTypeSSR    = "ssr"
+
+	// containerPort is the port that Trapiche sends traffic to inside a container.
+	containerPort = 3000
+)
+
+// serverDependencies are packages that mean the project is a server app.
+// The API has the final say. This list only gives a first hint.
+var serverDependencies = []string{
+	"express",
+	"fastify",
+	"koa",
+	"@nestjs/core",
+	"@hono/node-server",
+	"elysia",
+	"@remix-run/react",
+	"@sveltejs/kit",
+	"nuxt",
+	"@solidjs/start",
+	"@tanstack/start",
+	"@angular/ssr",
+	"@qwik.dev/city",
+}
+
+// normalizeDeployType checks the --type flag value. An empty value means auto.
+func normalizeDeployType(raw string) (string, error) {
+	switch v := strings.ToLower(strings.TrimSpace(raw)); v {
+	case "", deployTypeAuto:
+		return deployTypeAuto, nil
+	case deployTypeStatic, deployTypeSSR:
+		return v, nil
+	case "container":
+		return deployTypeSSR, nil
+	default:
+		return "", fmt.Errorf("invalid --type %q: use static, ssr, or auto", raw)
+	}
+}
+
+// deployTypeLabel gives the name that users see.
+func deployTypeLabel(t string) string {
+	switch t {
+	case deployTypeSSR:
+		return "container"
+	case deployTypeStatic:
+		return "static site"
+	default:
+		return "auto"
+	}
+}
+
+// detectDeployType looks at the project folder and returns a type and the reason.
+// The type is "" when the folder does not give a clear answer. The caller then
+// sends "auto" and the API decides.
+func detectDeployType(dir string) (string, string) {
+	if info, err := os.Stat(filepath.Join(dir, "Dockerfile")); err == nil && !info.IsDir() {
+		return deployTypeSSR, "Dockerfile found"
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		if _, statErr := os.Stat(filepath.Join(dir, "index.html")); statErr == nil {
+			return deployTypeStatic, "index.html found, no package.json"
+		}
+		return "", ""
+	}
+
+	var pkg struct {
+		Dependencies    map[string]json.RawMessage `json:"dependencies"`
+		DevDependencies map[string]json.RawMessage `json:"devDependencies"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return "", ""
+	}
+	hasDep := func(name string) bool {
+		if _, ok := pkg.Dependencies[name]; ok {
+			return true
+		}
+		_, ok := pkg.DevDependencies[name]
+		return ok
+	}
+	for _, name := range serverDependencies {
+		if hasDep(name) {
+			return deployTypeSSR, name + " in package.json"
+		}
+	}
+	// Next.js is static only with output: 'export'. This is the same rule as the API.
+	if hasDep("next") {
+		if nextHasStaticExport(dir) {
+			return deployTypeStatic, "Next.js with static export"
+		}
+		return deployTypeSSR, "Next.js server"
+	}
+	return "", ""
+}
+
+// nextHasStaticExport reports whether next.config sets output: 'export'.
+func nextHasStaticExport(dir string) bool {
+	for _, name := range []string{"next.config.js", "next.config.mjs", "next.config.ts"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		text := string(data)
+		if strings.Contains(text, "output: 'export'") || strings.Contains(text, `output: "export"`) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveDeployType decides which type to send to the API.
+//
+//	requested: the --type value (auto, static, or ssr)
+//	detected:  the result of detectDeployType ("" if not clear)
+//	saved:     the type in trapiche.json ("" if not known)
+//	isUpdate:  true when the deploy updates an existing deployment
+//
+// The type of an existing deployment cannot change. A different --type is an error.
+// When trapiche.json has no saved type (an older file), the CLI sends no type
+// unless --type is set. The server keeps the type that the deployment has.
+func resolveDeployType(requested, detected, saved string, isUpdate bool) (string, error) {
+	if isUpdate && saved != "" {
+		if requested != deployTypeAuto && requested != saved {
+			return "", fmt.Errorf("this deployment is a %s and cannot change to a %s — use --new to create a new deployment",
+				deployTypeLabel(saved), deployTypeLabel(requested))
+		}
+		return saved, nil
+	}
+	if isUpdate {
+		if requested != deployTypeAuto {
+			return requested, nil
+		}
+		return "", nil
+	}
+	if requested != deployTypeAuto {
+		return requested, nil
+	}
+	if detected != "" {
+		return detected, nil
+	}
+	return deployTypeAuto, nil
+}
+
+// describeDeployType makes the "Type:" line that deploy prints.
+func describeDeployType(chosen, requested, detected, reason string, saved bool) string {
+	label := deployTypeLabel(chosen)
+	switch {
+	case chosen == "":
+		return "same as the linked deployment"
+	case saved:
+		return fmt.Sprintf("%s (same as the linked deployment)", label)
+	case requested != deployTypeAuto:
+		return fmt.Sprintf("%s (--type %s)", label, requested)
+	case detected != "":
+		return fmt.Sprintf("%s (%s)", label, reason)
+	default:
+		return "auto (the server decides)"
+	}
+}
+
+// dockerfilePortWarning returns a warning when the Dockerfile exposes ports
+// and none of them is the container port. It returns "" in all other cases.
+func dockerfilePortWarning(dir string) string {
+	file, err := os.Open(filepath.Join(dir, "Dockerfile"))
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	var exposed []int
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 || !strings.EqualFold(fields[0], "EXPOSE") {
+			continue
+		}
+		for _, f := range fields[1:] {
+			port, _, _ := strings.Cut(f, "/")
+			if n, err := strconv.Atoi(port); err == nil {
+				exposed = append(exposed, n)
+			}
+		}
+	}
+	if len(exposed) == 0 {
+		return ""
+	}
+	for _, p := range exposed {
+		if p == containerPort {
+			return ""
+		}
+	}
+	return fmt.Sprintf("Dockerfile exposes port %d, but Trapiche sends traffic to port %d. Make your app listen on port %d.",
+		exposed[0], containerPort, containerPort)
+}

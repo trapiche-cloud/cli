@@ -89,7 +89,7 @@ func TestQueueAuthenticatedDeployUpdate(t *testing.T) {
 	defer srv.Close()
 
 	apiBase = srv.URL
-	got, err := queueAuthenticatedDeployUpdate(creds, archivePath, "dep_existing", "https://github.com/o/r", "main")
+	got, err := queueAuthenticatedDeployUpdate(creds, archivePath, "dep_existing", "https://github.com/o/r", "main", "")
 	if err != nil {
 		t.Fatal(err)
 	}

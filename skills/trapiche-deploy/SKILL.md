@@ -11,7 +11,7 @@ Deploy the current project to Trapiche and return a live URL.
 ## Prerequisites
 
 - User must be logged in: `trapiche auth login`
-- Project must be a **static** site (Next.js with `output: 'export'`, Vite, Astro static, CRA, etc.)
+- Project must be a **static** site (Next.js with `output: 'export'`, Vite, Astro static, CRA, etc.) or a **container** app (server apps). A container app has a `Dockerfile` at the root, or a server framework such as Express, Fastify, NestJS, or Next.js without `output: 'export'`. It must listen on port **3000**.
 
 ## Setup
 
@@ -21,6 +21,7 @@ Deploy the current project to Trapiche and return a live URL.
 | **Repository** | `git remote origin` | `--repo owner/repo` |
 | **Branch metadata** | Current git branch | `--branch main` |
 | **App name** | Repo name | `--name my-app` |
+| **Type** | `auto` (detected) | `--type static` or `--type ssr` (container) |
 | **API endpoint** | `https://api.trapiche.cloud` | `--api http://localhost:8080` |
 
 ## Workflow
@@ -86,6 +87,9 @@ trapiche logs dep_abc123   # specific deployment
 trapiche link dep_abc123   # link project to existing deployment
 trapiche unlink            # remove trapiche.json
 trapiche deploy --new      # force a new deployment
+trapiche env list          # environment variables of the linked deployment (values hidden)
+trapiche env set KEY=VALUE # set variables, applies on the next deploy
+trapiche env unset KEY     # remove a variable
 ```
 
 ## Redeploy
@@ -101,6 +105,7 @@ Add `trapiche.json` to `.gitignore` if you do not want deployment metadata in gi
 ## Guidance
 
 - Auth is required — anonymous deploy is not supported.
-- Only static sites are supported via CLI upload.
+- Static sites and container (server) apps are supported via CLI upload. The type of a deployment cannot change. To switch type, use `trapiche deploy --new`.
+- Container apps get a URL like `https://my-app.ssr.trapiche.cloud`. The app must listen on port 3000. The CLI does not send `.env` files. Set variables with `trapiche env set KEY=VALUE` (or `--file .env`). They apply on the next deploy.
 - The CLI uploads local source; GitHub is metadata only (repo linking), not used to fetch code.
 - If build fails, read the logs printed by the CLI and report the error.

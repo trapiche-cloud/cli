@@ -26,6 +26,19 @@ func defaultCredentialsPath() (string, error) {
 }
 
 func loadCredentials() (*credentials, error) {
+	creds, err := loadCredentialsRaw()
+	if err != nil {
+		return nil, err
+	}
+	if !creds.ExpiresAt.IsZero() && time.Now().After(creds.ExpiresAt) {
+		return nil, fmt.Errorf("session expired — run: trapiche auth login")
+	}
+	return creds, nil
+}
+
+// loadCredentialsRaw reads the saved token and does not check the expiry date.
+// Logout uses it so an expired token is still sent for revocation.
+func loadCredentialsRaw() (*credentials, error) {
 	path, err := credentialsPath()
 	if err != nil {
 		return nil, err
@@ -45,9 +58,6 @@ func loadCredentials() (*credentials, error) {
 	}
 	if creds.Token == "" {
 		return nil, fmt.Errorf("not logged in — run: trapiche auth login")
-	}
-	if !creds.ExpiresAt.IsZero() && time.Now().After(creds.ExpiresAt) {
-		return nil, fmt.Errorf("session expired — run: trapiche auth login")
 	}
 	return &creds, nil
 }

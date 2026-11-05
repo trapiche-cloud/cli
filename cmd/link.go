@@ -59,7 +59,7 @@ func runLink(deploymentID, dir string) error {
 
 	repoURL := dep.RepoURL
 	if repoURL == "" {
-		repoURL, err = gitOriginRemote()
+		repoURL, err = gitOriginRemote(absDir)
 		if err != nil {
 			return err
 		}
@@ -67,7 +67,7 @@ func runLink(deploymentID, dir string) error {
 
 	branch := dep.Branch
 	if branch == "" {
-		branch, err = gitCurrentBranch()
+		branch, err = gitCurrentBranch(absDir)
 		if err != nil {
 			return err
 		}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"time"
@@ -48,35 +49,110 @@ func newAuthLoginCommand() *cobra.Command {
 }
 
 func newAuthLogoutCommand() *cobra.Command {
-	return &cobra.Command{
+	var force bool
+	command := &cobra.Command{
 		Use:   "logout",
-		Short: "Remove local credentials",
+		Short: "Revoke the token and remove local credentials",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := clearCredentials(); err != nil {
-				return err
-			}
-			fmt.Println("Logged out.")
-			return nil
+			return runAuthLogout(force)
 		},
 	}
+	command.Flags().BoolVar(&force, "force", false, "Remove local credentials even if the server did not revoke the token")
+	return command
 }
 
 func newAuthStatusCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "status",
-		Short: "Show login status",
+		Use:     "status",
+		Aliases: []string{"whoami"},
+		Short:   "Show login status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			creds, err := loadCredentials()
-			if err != nil {
-				fmt.Println("Not logged in.")
-				return nil
-			}
-			fmt.Printf("Logged in as %s\n", creds.Username)
-			if !creds.ExpiresAt.IsZero() {
-				fmt.Printf("Token expires: %s\n", creds.ExpiresAt.Format(time.RFC3339))
-			}
-			return nil
+			return runAuthStatus()
 		},
+	}
+}
+
+// runAuthLogout revokes the token on the server. The local file is removed
+// only when the server confirms, or when force is set. An expired token is
+// still sent, because the server can hold it as valid.
+func runAuthLogout(force bool) error {
+	creds, err := loadCredentialsRaw()
+	if err != nil {
+		// No token in the file: nothing to revoke. Remove any stale file.
+		if clearErr := clearCredentials(); clearErr != nil {
+			return clearErr
+		}
+		fmt.Println("Not logged in.")
+		return nil
+	}
+
+	_, status, reqErr := apiDelete(creds, "/api/auth/cli/token")
+	var failure error
+	switch {
+	case reqErr != nil:
+		failure = fmt.Errorf("could not revoke token: %w", reqErr)
+	case status == http.StatusOK || status == http.StatusNoContent || status == http.StatusUnauthorized:
+		fmt.Println("Token revoked.")
+	default:
+		failure = fmt.Errorf("could not revoke token (status %d)", status)
+	}
+
+	if failure != nil {
+		if !force {
+			return fmt.Errorf("%w. The token stays valid on the server and local credentials are kept. Try again, or use --force to remove them anyway", failure)
+		}
+		fmt.Fprintf(os.Stderr, "warning: %v. The token may stay valid on the server.\n", failure)
+	}
+
+	if err := clearCredentials(); err != nil {
+		return err
+	}
+	if failure != nil {
+		fmt.Println("Local credentials removed.")
+		return nil
+	}
+	fmt.Println("Logged out.")
+	return nil
+}
+
+// runAuthStatus checks the saved token with the API. It returns an error
+// (exit code 1) unless the server confirms the user.
+func runAuthStatus() error {
+	creds, err := loadCredentials()
+	if err != nil {
+		return err
+	}
+
+	data, status, reqErr := apiGet(creds, "/api/auth/me")
+	if reqErr != nil {
+		return fmt.Errorf("could not verify token: %w", reqErr)
+	}
+
+	switch status {
+	case http.StatusOK:
+		// The API answers {"user": {"Username": ...}, ...}. The user model has no
+		// JSON tags, so the key is "Username". Go matches the key without case.
+		var me struct {
+			User struct {
+				Username string `json:"username"`
+			} `json:"user"`
+		}
+		if err := json.Unmarshal(data, &me); err != nil || me.User.Username == "" {
+			return fmt.Errorf("could not verify token: unexpected response from /api/auth/me")
+		}
+		fmt.Printf("Logged in as %s\n", me.User.Username)
+		printTokenExpiry(creds)
+		return nil
+	case http.StatusUnauthorized:
+		return fmt.Errorf("token not valid — run: trapiche auth login")
+	default:
+		return apiError(status, data)
+	}
+}
+
+func printTokenExpiry(creds *credentials) {
+	if !creds.ExpiresAt.IsZero() {
+		fmt.Printf("Token expires: %s\n", creds.ExpiresAt.Format(time.RFC3339))
 	}
 }
 
@@ -164,9 +240,7 @@ func openBrowser(url string) error {
 		return exec.Command("open", url).Start()
 	case "linux":
 		return exec.Command("xdg-open", url).Start()
-	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 	default:
-		return fmt.Errorf("unsupported platform")
+		return fmt.Errorf("unsupported platform (macOS and Linux only)")
 	}
 }

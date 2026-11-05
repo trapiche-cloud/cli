@@ -22,6 +22,7 @@ func init() {
 	rootCmd.AddCommand(newUnlinkCommand())
 	rootCmd.AddCommand(newLogsCommand())
 	rootCmd.AddCommand(newDeploymentsCommand())
+	rootCmd.AddCommand(newEnvCommand())
 }
 
 func Execute() error {

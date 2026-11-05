@@ -165,7 +165,7 @@ func TestQueueAuthenticatedDeploy(t *testing.T) {
 	defer srv.Close()
 
 	apiBase = srv.URL
-	got, err := queueAuthenticatedDeploy(creds, archivePath, "https://github.com/o/r", "app", "main")
+	got, err := queueAuthenticatedDeploy(creds, archivePath, "https://github.com/o/r", "app", "main", "")
 	if err != nil {
 		t.Fatal(err)
 	}

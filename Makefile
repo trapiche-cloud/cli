@@ -3,6 +3,7 @@ GITHUB_REPO  ?= trapiche-cloud/cli
 VERSION      ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
 BIN          := trapiche
 BUILD_DIR    := dist
+INSTALL_DIR  ?= /usr/local/bin
 
 # MGC bucket/path where install.sh is publicly served
 # Assumes trapiche.cloud/install.sh is routed to this bucket object
@@ -10,11 +11,16 @@ MGC_BUCKET   ?= trapiche-cdn
 MGC_REGION   ?= br-se1
 
 # ── targets ───────────────────────────────────────────────────────────────────
-.PHONY: build build-all release upload-install clean
+.PHONY: build install build-all release upload-install clean
 
 ## build: build for current platform
 build:
 	go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(BIN) .
+
+## install: build and replace the installed CLI (asks for sudo)
+install: build
+	sudo install -m 0755 $(BIN) $(INSTALL_DIR)/$(BIN)
+	@echo "Installed $(INSTALL_DIR)/$(BIN)"
 
 ## build-all: cross-compile for all supported platforms
 build-all:

@@ -43,13 +43,36 @@ func newLogsCommand() *cobra.Command {
 				defer cancel()
 			}
 
-			return streamDeploymentLogs(ctx, creds, deploymentID, noFollow)
+			return showDeploymentLogs(ctx, creds, deploymentID, noFollow)
 		},
 	}
 
 	cmd.Flags().StringVar(&repo, "repo", "", "Filter repo when resolving latest deployment")
 	cmd.Flags().BoolVar(&noFollow, "no-follow", false, "Print current logs and exit")
 	return cmd
+}
+
+// showDeploymentLogs picks the log source for a deployment.
+// The log stream shows runtime logs for a container, and a container has none
+// while it builds. So during a build, the log stream is only safe for a known
+// static deployment. For a container, or when the type is not known, the build
+// log comes from the deployment record. This is the same rule as the deploy wait.
+// A finished deployment uses the log stream.
+func showDeploymentLogs(ctx context.Context, creds *credentials, deploymentID string, noFollow bool) error {
+	dep, err := getDeployment(creds, deploymentID)
+	if err != nil {
+		return err
+	}
+	building := dep.Status == "queued" || dep.Status == "building"
+	if building && dep.DeploymentType != deployTypeStatic {
+		if noFollow {
+			printed := 0
+			printNewLogs(dep.Logs, &printed)
+			return nil
+		}
+		return followBuildLogs(ctx, creds, deploymentID)
+	}
+	return streamDeploymentLogs(ctx, creds, deploymentID, noFollow)
 }
 
 func resolveLatestDeploymentID(creds *credentials, repoFilter string) (string, error) {
@@ -87,7 +110,7 @@ func fetchDeployments(creds *credentials, repoFilter string, all bool) ([]deploy
 
 	filter := strings.TrimSpace(repoFilter)
 	if filter == "" {
-		origin, err := gitOriginRemote()
+		origin, err := gitOriginRemote(".")
 		if err != nil {
 			return nil, fmt.Errorf("no deployments matched — pass --repo or run from a git repository")
 		}
