@@ -420,13 +420,266 @@ func TestNextStaticExportAllConfigNames(t *testing.T) {
 }
 
 func TestContainerPortHint(t *testing.T) {
-	dir := t.TempDir()
-	if hint := containerPortHint(dir); !strings.Contains(hint, "3000") {
-		t.Fatalf("no Dockerfile: hint = %q", hint)
+	t.Run("no Dockerfile", func(t *testing.T) {
+		if hint := containerPortHint(t.TempDir()); !strings.Contains(hint, "3000") {
+			t.Fatalf("hint = %q", hint)
+		}
+	})
+	t.Run("Dockerfile without EXPOSE", func(t *testing.T) {
+		dir := t.TempDir()
+		writeProjectFile(t, dir, "Dockerfile", "FROM node\nCMD [\"node\",\"x.js\"]\n")
+		if hint := containerPortHint(dir); !strings.Contains(hint, "3000") {
+			t.Fatalf("hint = %q", hint)
+		}
+	})
+	t.Run("Dockerfile with EXPOSE $PORT", func(t *testing.T) {
+		dir := t.TempDir()
+		writeProjectFile(t, dir, "Dockerfile", "FROM node\nEXPOSE $PORT\n")
+		if hint := containerPortHint(dir); !strings.Contains(hint, "3000") {
+			t.Fatalf("hint = %q", hint)
+		}
+	})
+	t.Run("Dockerfile with a number: the exact warning is used", func(t *testing.T) {
+		for _, expose := range []string{"EXPOSE 3000", "EXPOSE 8080"} {
+			dir := t.TempDir()
+			writeProjectFile(t, dir, "Dockerfile", "FROM node\n"+expose+"\n")
+			if hint := containerPortHint(dir); hint != "" {
+				t.Fatalf("%s: hint = %q", expose, hint)
+			}
+		}
+	})
+}
+
+// Next.js loads one config file. The first that exists in nextConfigNames order counts.
+func TestNextOnlyTheLoadedConfigFileCounts(t *testing.T) {
+	const withExport = "export default { output: 'export' }"
+	const withoutExport = "export default { reactStrictMode: true }"
+
+	cases := []struct {
+		name string
+		js   string
+		ts   string
+		want string
+	}{
+		{"js loaded, no export; leftover ts has it", withoutExport, withExport, deployTypeSSR},
+		{"js loaded, has export; ts has none", withExport, withoutExport, deployTypeStatic},
 	}
-	writeProjectFile(t, dir, "Dockerfile", "FROM node")
-	if hint := containerPortHint(dir); hint != "" {
-		t.Fatalf("with Dockerfile the exact warning is used, got hint %q", hint)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeProjectFile(t, dir, "package.json", `{"dependencies":{"next":"14.0.0"}}`)
+			writeProjectFile(t, dir, "next.config.js", tc.js)
+			writeProjectFile(t, dir, "next.config.ts", tc.ts)
+			if got, _ := detectDeployType(dir); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNextStaticExportIgnoresTextInStrings(t *testing.T) {
+	ssrConfigs := []string{
+		`const note = "output: 'export'"; module.exports = {}`,
+		"const note = `set output: 'export' for GitHub Pages`;\nexport default {}",
+		"const output = 'export'; export default {}",
+		"export default { output: 'standalone' }",
+	}
+	for _, cfg := range ssrConfigs {
+		dir := t.TempDir()
+		writeProjectFile(t, dir, "package.json", `{"dependencies":{"next":"14.0.0"}}`)
+		writeProjectFile(t, dir, "next.config.js", cfg)
+		if got, _ := detectDeployType(dir); got != deployTypeSSR {
+			t.Fatalf("config %q: got %q, want ssr", cfg, got)
+		}
+	}
+
+	staticConfigs := []string{
+		`module.exports = { "output": "export" }`,
+		"module.exports = {\n  output:\n    'export',\n}",
+	}
+	for _, cfg := range staticConfigs {
+		dir := t.TempDir()
+		writeProjectFile(t, dir, "package.json", `{"dependencies":{"next":"14.0.0"}}`)
+		writeProjectFile(t, dir, "next.config.js", cfg)
+		if got, _ := detectDeployType(dir); got != deployTypeStatic {
+			t.Fatalf("config %q: got %q, want static", cfg, got)
+		}
+	}
+}
+
+func TestKeepSavedDeployment(t *testing.T) {
+	saved := &projectConfig{DeploymentID: "dep_1", Name: "app", URL: "https://app.ssr.example.com", DeploymentType: "ssr"}
+
+	// A redeploy reply with no URL must not erase the saved URL.
+	created := &deploymentResponse{ID: "dep_1", URL: ""}
+	keepSavedDeployment(created, saved)
+	if created.URL != saved.URL || created.Name != "app" || created.DeploymentType != "ssr" {
+		t.Fatalf("created = %#v", created)
+	}
+
+	// Values from the reply win over the saved ones.
+	created = &deploymentResponse{ID: "dep_1", Name: "new", URL: "https://new.example.com", DeploymentType: "static"}
+	keepSavedDeployment(created, saved)
+	if created.URL != "https://new.example.com" || created.Name != "new" || created.DeploymentType != "static" {
+		t.Fatalf("created = %#v", created)
+	}
+
+	keepSavedDeployment(nil, saved)
+	keepSavedDeployment(&deploymentResponse{}, nil)
+}
+
+// A redeploy whose reply has no URL must leave the URL in trapiche.json,
+// also when the wait never succeeds (failed build, --detach).
+func TestRedeployKeepsSavedURLInProjectConfig(t *testing.T) {
+	dir := t.TempDir()
+	first := &deploymentResponse{ID: "dep_1", Name: "app", URL: "https://app.ssr.example.com", DeploymentType: "ssr"}
+	if err := refreshProjectConfig(dir, first, "https://github.com/o/r", "main"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadProjectConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply := &deploymentResponse{ID: "dep_1", Name: "app", DeploymentType: "ssr"} // "url" is empty
+	keepSavedDeployment(reply, cfg)
+	if err := refreshProjectConfig(dir, reply, "https://github.com/o/r", "main"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadProjectConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.URL != "https://app.ssr.example.com" {
+		t.Fatalf("saved URL was erased: %#v", cfg)
+	}
+}
+
+// A build that ends as "suspended" has a URL. The CLI must report the billing
+// problem and still hand back the deployment, so that the URL is saved.
+func TestPollSuspendedReturnsDeploymentAndError(t *testing.T) {
+	creds := &credentials{Token: "trp_testtoken"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(deploymentResponse{
+			ID: "dep_1", DeploymentType: "ssr", Status: "suspended", URL: "https://app.ssr.example.com", Logs: "built\n",
+		})
+	}))
+	defer srv.Close()
+	useAPI(t, srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var (
+		err   error
+		final *deploymentResponse
+	)
+	captureOutput(func() {
+		final, err = pollDeploymentUntilDone(ctx, creds, "dep_1", "", "ssr")
+	})
+	if err == nil || !strings.Contains(err.Error(), "suspended") {
+		t.Fatalf("expected a suspended error, got %v", err)
+	}
+	if final == nil || final.URL != "https://app.ssr.example.com" {
+		t.Fatalf("final = %#v", final)
+	}
+
+	created := &deploymentResponse{ID: "dep_1", DeploymentType: "ssr"}
+	if !mergeFinalDeployment(created, final) || created.URL != final.URL {
+		t.Fatalf("URL was not merged: %#v", created)
+	}
+}
+
+func useNoFollowLimits(t *testing.T, idle, max time.Duration) {
+	t.Helper()
+	oldIdle, oldMax := noFollowIdle, noFollowMax
+	noFollowIdle, noFollowMax = idle, max
+	t.Cleanup(func() { noFollowIdle, noFollowMax = oldIdle, oldMax })
+}
+
+// A container that logs all the time never goes quiet. --no-follow must still stop.
+func TestNoFollowStopsWhenLinesKeepComing(t *testing.T) {
+	useNoFollowLimits(t, time.Second, 1500*time.Millisecond)
+	creds := &credentials{Token: "trp_testtoken"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/logs/stream") {
+			_ = json.NewEncoder(w).Encode(deploymentResponse{ID: "dep_1", DeploymentType: "ssr", Status: "deployed"})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				_, _ = w.Write([]byte("data: tick\n\n"))
+				w.(http.Flusher).Flush()
+			}
+		}
+	}))
+	defer srv.Close()
+	useAPI(t, srv.URL)
+
+	start := time.Now()
+	var (
+		err error
+		out string
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		out = captureOutput(func() {
+			err = showDeploymentLogs(context.Background(), creds, "dep_1", true)
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("logs --no-follow did not stop while lines kept coming")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("took %s", elapsed)
+	}
+	if !strings.Contains(out, "tick") {
+		t.Fatalf("out = %q", out)
+	}
+}
+
+// The idle timer starts when the server answers. A slow first byte must still be printed.
+func TestNoFollowPrintsLineThatArrivesAfterIdleTime(t *testing.T) {
+	useNoFollowLimits(t, 300*time.Millisecond, 5*time.Second)
+	creds := &credentials{Token: "trp_testtoken"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/logs/stream") {
+			_ = json.NewEncoder(w).Encode(deploymentResponse{ID: "dep_1", DeploymentType: "ssr", Status: "deployed"})
+			return
+		}
+		select {
+		case <-time.After(800 * time.Millisecond): // longer than the idle time
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: late line\n\n"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	useAPI(t, srv.URL)
+
+	var err error
+	out := captureOutput(func() {
+		err = showDeploymentLogs(context.Background(), creds, "dep_1", true)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "late line") {
+		t.Fatalf("slow first byte was lost, out = %q", out)
 	}
 }
 
@@ -547,6 +800,8 @@ func TestNoFollowStopsWhenStreamGoesQuiet(t *testing.T) {
 }
 
 func TestNoFollowStopsWhenStreamSendsNothing(t *testing.T) {
+	// The server never answers, so only the maximum time can stop the command.
+	useNoFollowLimits(t, 500*time.Millisecond, time.Second)
 	creds := &credentials{Token: "trp_testtoken"}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/logs/stream") {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -39,7 +38,7 @@ func newLogsCommand() *cobra.Command {
 			ctx := context.Background()
 			if !noFollow {
 				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
+				ctx, cancel = context.WithTimeout(context.Background(), deployWaitTimeout)
 				defer cancel()
 			}
 

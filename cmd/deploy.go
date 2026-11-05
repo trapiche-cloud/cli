@@ -204,6 +204,9 @@ func runDeploy(opts deployOptions) error {
 	}
 
 	if isUpdate {
+		// The reply of an update can have no URL (a failed build clears it).
+		// Saving it as it is would erase the URL in trapiche.json.
+		keepSavedDeployment(created, cfg)
 		if err := refreshProjectConfig(absDir, created, repoURL, branch); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to update %s: %v\n", projectConfigFile, err)
 		}
@@ -214,23 +217,40 @@ func runDeploy(opts deployOptions) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), deployWaitTimeout)
 	defer cancel()
 
-	final, err := pollDeploymentUntilDone(ctx, creds, created.ID, created.URL, created.DeploymentType)
-	if err != nil {
-		return err
-	}
+	final, waitErr := pollDeploymentUntilDone(ctx, creds, created.ID, created.URL, created.DeploymentType)
 
 	// trapiche.json was written from the upload reply. That reply can have no URL
-	// (a container has none yet) and no type (auto). The deployment is finished
-	// now, so save the URL and type that the server reports.
-	if mergeFinalDeployment(created, final) {
+	// (a container has none yet) and no type (auto). Save the URL and type that
+	// the server reports. A finished build that ends as "suspended" also has them.
+	if final != nil && mergeFinalDeployment(created, final) {
 		if err := refreshProjectConfig(absDir, created, repoURL, branch); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to update %s: %v\n", projectConfigFile, err)
 		}
 	}
-	return nil
+	return waitErr
+}
+
+// deployWaitTimeout is how long the CLI waits for a build. The API stops a build
+// after 15 minutes, so the CLI waits a little longer to see the result.
+const deployWaitTimeout = 16 * time.Minute
+
+// keepSavedDeployment fills the empty fields of an upload reply from trapiche.json.
+func keepSavedDeployment(created *deploymentResponse, saved *projectConfig) {
+	if created == nil || saved == nil {
+		return
+	}
+	if created.Name == "" {
+		created.Name = saved.Name
+	}
+	if created.URL == "" {
+		created.URL = saved.URL
+	}
+	if created.DeploymentType == "" {
+		created.DeploymentType = saved.DeploymentType
+	}
 }
 
 // mergeFinalDeployment copies the URL and type of a finished deployment into
@@ -406,7 +426,7 @@ func followBuildLogs(ctx context.Context, creds *credentials, deploymentID strin
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out")
+			return fmt.Errorf("timed out while waiting for the build — it may still be running. Check with: trapiche logs %s", deploymentID)
 		case <-ticker.C:
 		}
 	}
@@ -443,6 +463,13 @@ func pollDeploymentUntilDone(ctx context.Context, creds *credentials, deployment
 		}
 		fmt.Printf("\n✓ Deployed!\n\n  %s\n", dep.URL)
 		return dep, nil
+	case "suspended":
+		// The build finished and has a URL, but the account is suspended (billing).
+		// Return the deployment so the caller keeps the URL.
+		if dep.URL == "" {
+			dep.URL = defaultURL
+		}
+		return dep, fmt.Errorf("the build finished, but the deployment is suspended (account billing) — check your plan in the dashboard")
 	case "failed":
 		return nil, fmt.Errorf("deployment failed")
 	default:
@@ -465,10 +492,17 @@ func getDeployment(creds *credentials, id string) (*deploymentResponse, error) {
 	return &dep, nil
 }
 
-// noFollowIdle is how long `logs --no-follow` waits for a new line before it exits.
-// The log stream of a running container never ends. So "print the current logs
-// and exit" means: print what arrives, and stop when the stream goes quiet.
-const noFollowIdle = 2 * time.Second
+// Limits of `logs --no-follow`. The log stream of a running container never
+// ends, so "print the current logs and exit" needs two limits:
+//   - noFollowIdle: stop when no log line arrives for this long. The timer starts
+//     when the server answers, not before, so a slow first byte is still printed.
+//   - noFollowMax: stop after this long, even if lines keep arriving.
+//
+// They are variables so that tests can use short values.
+var (
+	noFollowIdle = 2 * time.Second
+	noFollowMax  = 10 * time.Second
+)
 
 func streamDeploymentLogs(ctx context.Context, creds *credentials, deploymentID string, noFollow bool) error {
 	url := apiPath("/api/deployments/" + deploymentID + "/logs/stream")
@@ -477,18 +511,15 @@ func streamDeploymentLogs(ctx context.Context, creds *credentials, deploymentID 
 		return err
 	}
 
-	// resetIdle is set only for --no-follow. It restarts the idle timer on each line.
-	var resetIdle func()
+	var cancel context.CancelFunc
 	if noFollow {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
+		ctx, cancel = context.WithTimeout(ctx, noFollowMax)
 		defer cancel()
-		idle := time.AfterFunc(noFollowIdle, cancel)
-		defer idle.Stop()
-		resetIdle = func() { idle.Reset(noFollowIdle) }
 	}
-	// stoppedByIdle is true when --no-follow ended the stream because it went quiet.
-	stoppedByIdle := func() bool { return noFollow && errors.Is(ctx.Err(), context.Canceled) }
+	// stoppedByLimit is true when --no-follow ended the stream on its own limits.
+	stoppedByLimit := func() bool {
+		return noFollow && (errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded))
+	}
 
 	// Stop the stream when the caller's time limit ends, even if no line arrives.
 	req = req.WithContext(ctx)
@@ -496,7 +527,7 @@ func streamDeploymentLogs(ctx context.Context, creds *credentials, deploymentID 
 	client := &http.Client{Timeout: 0}
 	resp, err := client.Do(req)
 	if err != nil {
-		if stoppedByIdle() {
+		if stoppedByLimit() {
 			return nil
 		}
 		return fmt.Errorf("failed to stream logs: %w", err)
@@ -508,14 +539,18 @@ func streamDeploymentLogs(ctx context.Context, creds *credentials, deploymentID 
 		return apiError(resp.StatusCode, body)
 	}
 
+	// The idle timer starts now: the server has answered.
+	var idle *time.Timer
+	if noFollow {
+		idle = time.AfterFunc(noFollowIdle, cancel)
+		defer idle.Stop()
+	}
+
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
-		if resetIdle != nil {
-			resetIdle()
-		}
 		select {
 		case <-ctx.Done():
-			if stoppedByIdle() {
+			if stoppedByLimit() {
 				return nil
 			}
 			return fmt.Errorf("timed out")
@@ -528,10 +563,13 @@ func streamDeploymentLogs(ctx context.Context, creds *credentials, deploymentID 
 		}
 		if strings.HasPrefix(line, "data: ") {
 			fmt.Println(strings.TrimPrefix(line, "data: "))
+			if idle != nil {
+				idle.Reset(noFollowIdle)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		if stoppedByIdle() {
+		if stoppedByLimit() {
 			return nil
 		}
 		return err

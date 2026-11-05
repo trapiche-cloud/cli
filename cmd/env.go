@@ -123,6 +123,35 @@ func parseEnvArgs(args []string) ([]envPair, error) {
 	return pairs, nil
 }
 
+// parseEnvValue reads the value part of a KEY=VALUE line of a .env file.
+//   - A value in quotes ends at the closing quote. Text after it, such as
+//     a "# comment", is ignored.
+//   - An unquoted value ends at a "#" that follows a space or tab. A "#" with no
+//     space before it stays in the value (for example a URL with #fragment).
+//   - A quote with no closing quote is kept as it is.
+func parseEnvValue(raw string) string {
+	// KEY= # comment : a "#" after a space or tab, with nothing before it, is a comment.
+	if trimmed := strings.TrimLeft(raw, " \t"); len(trimmed) < len(raw) && strings.HasPrefix(trimmed, "#") {
+		return ""
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if raw[0] == '"' || raw[0] == '\'' {
+		if end := strings.IndexByte(raw[1:], raw[0]); end >= 0 {
+			return raw[1 : 1+end]
+		}
+		return raw
+	}
+	for i := 1; i < len(raw); i++ {
+		if raw[i] == '#' && (raw[i-1] == ' ' || raw[i-1] == '\t') {
+			return strings.TrimSpace(raw[:i])
+		}
+	}
+	return raw
+}
+
 // parseEnvFile reads KEY=VALUE lines. It skips blank lines and comments, accepts
 // an "export " prefix, and removes one pair of matching quotes around a value.
 // Keys with an empty value are returned in skipped.
@@ -147,12 +176,7 @@ func parseEnvFile(path string) (pairs []envPair, skipped []string, err error) {
 		if !ok || key == "" {
 			return nil, nil, fmt.Errorf("%s line %d: use KEY=VALUE", path, lineNo)
 		}
-		value = strings.TrimSpace(value)
-		if len(value) >= 2 {
-			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
-				value = value[1 : len(value)-1]
-			}
-		}
+		value = parseEnvValue(value)
 		if value == "" {
 			skipped = append(skipped, key)
 			continue

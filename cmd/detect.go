@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -115,19 +114,96 @@ var nextConfigNames = []string{
 	"next.config.ts", "next.config.mts", "next.config.cts",
 }
 
-// staticExportPattern matches output: 'export' (any quote style, any spacing).
-var staticExportPattern = regexp.MustCompile("output\\s*:\\s*['\"`]export['\"`]")
-
-// nextHasStaticExport reports whether a next.config file sets output: 'export'.
-// Comments are removed first, so a line like "// output: 'export'" does not count.
-// The type is saved in trapiche.json and cannot change, so a wrong guess is costly.
+// nextHasStaticExport reports whether the next.config file that Next.js loads
+// sets output: 'export'. Next.js loads one file: the first that exists in
+// nextConfigNames order. A second, unused file does not count. Comments and
+// text inside strings do not count either. The type is saved in trapiche.json
+// and cannot change, so a wrong guess is costly.
 func nextHasStaticExport(dir string) bool {
 	for _, name := range nextConfigNames {
 		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
+		if os.IsNotExist(err) {
 			continue
 		}
-		if staticExportPattern.MatchString(stripJSComments(string(data))) {
+		if err != nil {
+			return false
+		}
+		return hasOutputExport(stripJSComments(string(data)))
+	}
+	return false
+}
+
+type jsTokenKind int
+
+const (
+	tokIdent jsTokenKind = iota
+	tokString
+	tokPunct
+)
+
+type jsToken struct {
+	kind jsTokenKind
+	text string
+}
+
+func isJSIdentStart(c byte) bool {
+	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isJSIdentPart(c byte) bool {
+	return isJSIdentStart(c) || (c >= '0' && c <= '9')
+}
+
+// tokenizeJS splits JavaScript or TypeScript source into identifiers, strings,
+// and single punctuation characters. A string is one token, so text inside a
+// string never looks like code. It is not a full parser.
+func tokenizeJS(src string) []jsToken {
+	var tokens []jsToken
+	for i := 0; i < len(src); {
+		c := src[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			i++
+		case c == '\'' || c == '"' || c == '`':
+			var sb strings.Builder
+			j := i + 1
+			for j < len(src) && src[j] != c {
+				if src[j] == '\\' && j+1 < len(src) {
+					j++
+				}
+				sb.WriteByte(src[j])
+				j++
+			}
+			tokens = append(tokens, jsToken{tokString, sb.String()})
+			i = j + 1
+		case isJSIdentStart(c):
+			j := i + 1
+			for j < len(src) && isJSIdentPart(src[j]) {
+				j++
+			}
+			tokens = append(tokens, jsToken{tokIdent, src[i:j]})
+			i = j
+		default:
+			tokens = append(tokens, jsToken{tokPunct, string(c)})
+			i++
+		}
+	}
+	return tokens
+}
+
+// hasOutputExport looks for the token sequence: output : 'export'
+// (the key may be a name or a string, the value must be the string export).
+func hasOutputExport(src string) bool {
+	tokens := tokenizeJS(src)
+	for i := 0; i+2 < len(tokens); i++ {
+		key := tokens[i]
+		if key.text != "output" || (key.kind != tokIdent && key.kind != tokString) {
+			continue
+		}
+		if tokens[i+1].kind != tokPunct || tokens[i+1].text != ":" {
+			continue
+		}
+		if val := tokens[i+2]; val.kind == tokString && val.text == "export" {
 			return true
 		}
 	}
@@ -184,10 +260,17 @@ func stripJSComments(src string) string {
 // containerPortHint reminds the user about the container port when the project
 // has no Dockerfile. The Dockerfile case has its own, more exact warning.
 func containerPortHint(dir string) string {
-	if info, err := os.Stat(filepath.Join(dir, "Dockerfile")); err == nil && !info.IsDir() {
+	ports, found := dockerfileExposedPorts(dir)
+	switch {
+	case !found:
+		return fmt.Sprintf("a container app must listen on port %d (Trapiche sends traffic to that port).", containerPort)
+	case len(ports) == 0:
+		// No EXPOSE, or only names such as EXPOSE $PORT. The CLI cannot tell the port.
+		return fmt.Sprintf("the Dockerfile has no numeric EXPOSE. Make your app listen on port %d (Trapiche sends traffic to that port).", containerPort)
+	default:
+		// Numeric ports: dockerfilePortWarning gives the exact answer.
 		return ""
 	}
-	return fmt.Sprintf("a container app must listen on port %d (Trapiche sends traffic to that port).", containerPort)
 }
 
 // resolveDeployType decides which type to send to the API.
@@ -240,16 +323,15 @@ func describeDeployType(chosen, requested, detected, reason string, saved bool) 
 	}
 }
 
-// dockerfilePortWarning returns a warning when the Dockerfile exposes ports
-// and none of them is the container port. It returns "" in all other cases.
-func dockerfilePortWarning(dir string) string {
+// dockerfileExposedPorts returns the numeric ports of the EXPOSE lines of the
+// Dockerfile in dir, and whether a Dockerfile exists. Names such as $PORT are skipped.
+func dockerfileExposedPorts(dir string) (ports []int, found bool) {
 	file, err := os.Open(filepath.Join(dir, "Dockerfile"))
 	if err != nil {
-		return ""
+		return nil, false
 	}
 	defer file.Close()
 
-	var exposed []int
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -259,10 +341,17 @@ func dockerfilePortWarning(dir string) string {
 		for _, f := range fields[1:] {
 			port, _, _ := strings.Cut(f, "/")
 			if n, err := strconv.Atoi(port); err == nil {
-				exposed = append(exposed, n)
+				ports = append(ports, n)
 			}
 		}
 	}
+	return ports, true
+}
+
+// dockerfilePortWarning returns a warning when the Dockerfile exposes ports
+// and none of them is the container port. It returns "" in all other cases.
+func dockerfilePortWarning(dir string) string {
+	exposed, _ := dockerfileExposedPorts(dir)
 	if len(exposed) == 0 {
 		return ""
 	}

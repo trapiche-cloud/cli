@@ -65,6 +65,54 @@ func TestParseEnvFile(t *testing.T) {
 	}
 }
 
+func TestParseEnvValue(t *testing.T) {
+	cases := map[string]string{
+		"plain":                          "plain",
+		"  spaced  ":                     "spaced",
+		"postgres://db/app # local":      "postgres://db/app",
+		"value\t# tab comment":           "value",
+		"http://x.test/#fragment":        "http://x.test/#fragment",
+		`"secret" # prod`:                "secret",
+		`'secret' # prod`:                "secret",
+		`"with # inside" # real comment`: "with # inside",
+		`"a b"`:                          "a b",
+		`"unterminated`:                  `"unterminated`,
+		" # only a comment":              "",
+		"#nospace":                       "#nospace",
+		`""`:                             "",
+		"":                               "",
+	}
+	for in, want := range cases {
+		if got := parseEnvValue(in); got != want {
+			t.Fatalf("parseEnvValue(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestParseEnvFileTrailingComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	content := "DATABASE_URL=postgres://db/app # local\nKEY=\"secret\" # prod\nURL=http://x.test/#top\nONLY_COMMENT= # nothing\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pairs, skipped, err := parseEnvFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []envPair{{"DATABASE_URL", "postgres://db/app"}, {"KEY", "secret"}, {"URL", "http://x.test/#top"}}
+	if len(pairs) != len(want) {
+		t.Fatalf("pairs = %#v", pairs)
+	}
+	for i := range want {
+		if pairs[i] != want[i] {
+			t.Fatalf("pair %d = %#v, want %#v", i, pairs[i], want[i])
+		}
+	}
+	if len(skipped) != 1 || skipped[0] != "ONLY_COMMENT" {
+		t.Fatalf("skipped = %v", skipped)
+	}
+}
+
 func TestResolveEnvDeployment(t *testing.T) {
 	if id, _, err := resolveEnvDeployment(t.TempDir(), " dep_flag "); err != nil || id != "dep_flag" {
 		t.Fatalf("flag: %q, %v", id, err)
