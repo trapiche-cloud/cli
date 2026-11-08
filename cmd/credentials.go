@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,9 @@ type credentials struct {
 
 var credentialsPath = defaultCredentialsPath
 
+// errNotLoggedIn means there is no saved token (no file, or an empty token).
+var errNotLoggedIn = errors.New("not logged in — run: trapiche auth login")
+
 func defaultCredentialsPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -26,6 +30,19 @@ func defaultCredentialsPath() (string, error) {
 }
 
 func loadCredentials() (*credentials, error) {
+	creds, err := loadCredentialsRaw()
+	if err != nil {
+		return nil, err
+	}
+	if !creds.ExpiresAt.IsZero() && time.Now().After(creds.ExpiresAt) {
+		return nil, fmt.Errorf("session expired — run: trapiche auth login")
+	}
+	return creds, nil
+}
+
+// loadCredentialsRaw reads the saved token and does not check the expiry date.
+// Logout uses it so an expired token is still sent for revocation.
+func loadCredentialsRaw() (*credentials, error) {
 	path, err := credentialsPath()
 	if err != nil {
 		return nil, err
@@ -34,7 +51,7 @@ func loadCredentials() (*credentials, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("not logged in — run: trapiche auth login")
+			return nil, errNotLoggedIn
 		}
 		return nil, err
 	}
@@ -44,10 +61,7 @@ func loadCredentials() (*credentials, error) {
 		return nil, fmt.Errorf("invalid credentials file: %w", err)
 	}
 	if creds.Token == "" {
-		return nil, fmt.Errorf("not logged in — run: trapiche auth login")
-	}
-	if !creds.ExpiresAt.IsZero() && time.Now().After(creds.ExpiresAt) {
-		return nil, fmt.Errorf("session expired — run: trapiche auth login")
+		return nil, errNotLoggedIn
 	}
 	return &creds, nil
 }

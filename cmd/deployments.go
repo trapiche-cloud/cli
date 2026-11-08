@@ -29,7 +29,7 @@ func newDeploymentsCommand() *cobra.Command {
 			if cmd.Flags().Changed("repo") {
 				repoValue := repo
 				if repoValue == "" {
-					origin, err := gitOriginRemote()
+					origin, err := gitOriginRemote(".")
 					if err != nil {
 						return err
 					}

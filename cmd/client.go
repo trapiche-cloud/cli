@@ -41,6 +41,21 @@ func apiGet(creds *credentials, path string) ([]byte, int, error) {
 	return data, resp.StatusCode, nil
 }
 
+func apiDelete(creds *credentials, path string) ([]byte, int, error) {
+	req, err := authRequest(creds, http.MethodDelete, apiPath(path), nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return data, resp.StatusCode, nil
+}
+
 func apiPostJSON(creds *credentials, path string, payload any) ([]byte, int, error) {
 	var body io.Reader
 	if payload != nil {

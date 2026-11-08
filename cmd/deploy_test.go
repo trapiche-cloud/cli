@@ -21,10 +21,12 @@ type fakeEntry struct {
 	isDir bool
 }
 
-func (f fakeEntry) Name() string               { return f.name }
-func (f fakeEntry) IsDir() bool                { return f.isDir }
-func (f fakeEntry) Type() os.FileMode          { return 0 }
-func (f fakeEntry) Info() (os.FileInfo, error) { return fakeFileInfo{name: f.name, isDir: f.isDir}, nil }
+func (f fakeEntry) Name() string      { return f.name }
+func (f fakeEntry) IsDir() bool       { return f.isDir }
+func (f fakeEntry) Type() os.FileMode { return 0 }
+func (f fakeEntry) Info() (os.FileInfo, error) {
+	return fakeFileInfo{name: f.name, isDir: f.isDir}, nil
+}
 
 type fakeFileInfo struct {
 	name  string
@@ -165,7 +167,7 @@ func TestQueueAuthenticatedDeploy(t *testing.T) {
 	defer srv.Close()
 
 	apiBase = srv.URL
-	got, err := queueAuthenticatedDeploy(creds, archivePath, "https://github.com/o/r", "app", "main")
+	got, err := queueAuthenticatedDeploy(creds, archivePath, "https://github.com/o/r", "app", "main", "")
 	if err != nil {
 		t.Fatal(err)
 	}

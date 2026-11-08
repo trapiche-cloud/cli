@@ -12,8 +12,9 @@ var (
 	githubHTTPS     = regexp.MustCompile(`^https?://github\.com/([^/]+)/(.+?)(?:\.git)?/?$`)
 )
 
-func gitCurrentBranch() (string, error) {
-	out, err := exec.Command("git", "branch", "--show-current").Output()
+// gitCurrentBranch returns the branch of the git repository in dir.
+func gitCurrentBranch(dir string) (string, error) {
+	out, err := exec.Command("git", "-C", dir, "branch", "--show-current").Output()
 	if err != nil {
 		return "", err
 	}
@@ -24,8 +25,9 @@ func gitCurrentBranch() (string, error) {
 	return branch, nil
 }
 
-func gitOriginRemote() (string, error) {
-	out, err := exec.Command("git", "remote", "get-url", "origin").Output()
+// gitOriginRemote returns the origin remote of the git repository in dir.
+func gitOriginRemote(dir string) (string, error) {
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
 	if err != nil {
 		return "", fmt.Errorf("no git remote 'origin' found — pass --repo owner/name")
 	}
