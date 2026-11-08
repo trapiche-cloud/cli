@@ -1,2 +1,7 @@
 dist/
 trapiche
+
+.mcp.json
+.farol/
+.cursor/
+trapiche.json
