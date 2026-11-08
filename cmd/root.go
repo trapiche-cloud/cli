@@ -24,6 +24,7 @@ func init() {
 	rootCmd.AddCommand(newDeploymentsCommand())
 	rootCmd.AddCommand(newVersionCommand())
 	rootCmd.AddCommand(newUpdateCommand())
+	rootCmd.AddCommand(newEnvCommand())
 }
 
 func Execute() error {

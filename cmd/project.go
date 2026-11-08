@@ -16,6 +16,8 @@ type projectConfig struct {
 	URL          string `json:"url,omitempty"`
 	RepoURL      string `json:"repoURL,omitempty"`
 	Branch       string `json:"branch,omitempty"`
+	// DeploymentType is "static" or "ssr". It is set by the server and does not change.
+	DeploymentType string `json:"deploymentType,omitempty"`
 }
 
 func projectConfigPath(dir string) string {
@@ -76,6 +78,8 @@ func refreshProjectConfig(dir string, dep *deploymentResponse, repoURL, branch s
 		URL:          dep.URL,
 		RepoURL:      repoURL,
 		Branch:       branch,
+
+		DeploymentType: dep.DeploymentType,
 	}
 	return saveProjectConfig(dir, cfg)
 }
