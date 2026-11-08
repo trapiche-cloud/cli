@@ -193,46 +193,126 @@ func tokenizeJS(src string) []jsToken {
 
 // hasOutputExport looks for the token sequence: output : 'export'
 // (the key may be a name or a string, the value must be the string export).
-// It counts only an unconditional property. An object that follows "?", ":",
-// "&" or "|" (a ternary branch, or "cond && {...}") may not be the config that
-// Next.js runs, and static uploads are built with no environment variables. So
-// the CLI does not call such a config static. A wrapper call, as in
-// withPlugin({ output: 'export' }), still counts.
+// It counts only an unconditional property, because static uploads are built
+// with no environment variables and the CLI must not call a config static when
+// Next.js may not run that branch. A property does not count when it is inside:
+//   - an object that follows "?", ":", "&" or "|" (a ternary branch,
+//     "cond && {...}", or the value of another property such as images: {...});
+//   - a block of if, else, for, while, do, switch, catch or with;
+//   - a body of one of those with no braces, as in if (x) return {...}.
+//
+// A function body or a wrapper call, as in withPlugin({ output: 'export' }),
+// still counts.
 func hasOutputExport(src string) bool {
 	tokens := tokenizeJS(src)
-	// One entry for each open "{", "(" or "[". The value is true for a "{" that
-	// starts a conditional object.
-	var open []bool
+
+	type scope struct {
+		closer      string // "}", ")" or "]"; "" for a body with no braces
+		keyword     string // for "(": the identifier before it, such as "if"
+		conditional bool
+	}
+	var open []scope
 	conditionalDepth := 0
+	push := func(s scope) {
+		open = append(open, s)
+		if s.conditional {
+			conditionalDepth++
+		}
+	}
+	pop := func() scope {
+		s := open[len(open)-1]
+		open = open[:len(open)-1]
+		if s.conditional {
+			conditionalDepth--
+		}
+		return s
+	}
+	// popBraceless ends the bodies with no braces that are open at the top.
+	popBraceless := func() {
+		for len(open) > 0 && open[len(open)-1].closer == "" {
+			pop()
+		}
+	}
+	isPunct := func(i int, text string) bool {
+		return i >= 0 && i < len(tokens) && tokens[i].kind == tokPunct && tokens[i].text == text
+	}
+	isIdent := func(i int, text string) bool {
+		return i >= 0 && i < len(tokens) && tokens[i].kind == tokIdent && tokens[i].text == text
+	}
+	// controlKeywords take "(...)" and then a block or one statement.
+	controlKeywords := map[string]bool{
+		"if": true, "for": true, "while": true, "switch": true, "catch": true, "with": true,
+	}
+	// lastClosedKeyword is the keyword of the "(" that the previous token closed.
+	lastClosedKeyword := ""
+
 	for i, tok := range tokens {
+		closedKeyword := lastClosedKeyword
+		lastClosedKeyword = ""
+
+		if tok.kind == tokIdent {
+			// "else" and "do" start a body. With no "{" after them (and no "if"
+			// after else), the body is one statement.
+			if (tok.text == "else" || tok.text == "do") && !isPunct(i+1, "{") && !isIdent(i+1, "if") {
+				push(scope{conditional: true})
+				continue
+			}
+		}
+
 		if tok.kind == tokPunct {
 			switch tok.text {
-			case "{", "(", "[":
+			case "{":
 				conditional := false
-				if tok.text == "{" && i > 0 && tokens[i-1].kind == tokPunct {
-					switch tokens[i-1].text {
-					case "?", ":", "&", "|":
+				if i > 0 {
+					prev := tokens[i-1]
+					switch {
+					case prev.kind == tokPunct && (prev.text == "?" || prev.text == ":" || prev.text == "&" || prev.text == "|"):
+						conditional = true
+					case prev.kind == tokPunct && prev.text == ")" && controlKeywords[closedKeyword]:
+						conditional = true
+					case prev.kind == tokIdent && (prev.text == "else" || prev.text == "do"):
 						conditional = true
 					}
 				}
-				open = append(open, conditional)
-				if conditional {
-					conditionalDepth++
+				push(scope{closer: "}", conditional: conditional})
+			case "(", "[":
+				keyword := ""
+				if tok.text == "(" && i > 0 && tokens[i-1].kind == tokIdent {
+					keyword = tokens[i-1].text
 				}
+				closer := ")"
+				if tok.text == "[" {
+					closer = "]"
+				}
+				push(scope{closer: closer, keyword: keyword})
 			case "}", ")", "]":
-				if n := len(open); n > 0 {
-					if open[n-1] {
-						conditionalDepth--
+				popBraceless()
+				if len(open) > 0 {
+					s := pop()
+					if tok.text == ")" {
+						lastClosedKeyword = s.keyword
+						// if (...) with no "{" after it: the body is one statement.
+						if controlKeywords[s.keyword] && !isPunct(i+1, "{") {
+							push(scope{conditional: true})
+						}
 					}
-					open = open[:n-1]
+					// An object closed and a new statement starts, as in
+					// if (x) return { a: 1 }   then   return { ... }
+					// with no ";" between them.
+					if tok.text == "}" && i+1 < len(tokens) && tokens[i+1].kind == tokIdent {
+						popBraceless()
+					}
 				}
+			case ";":
+				popBraceless()
 			}
 			continue
 		}
+
 		if i+2 >= len(tokens) || tok.text != "output" || conditionalDepth > 0 {
 			continue
 		}
-		if tokens[i+1].kind != tokPunct || tokens[i+1].text != ":" {
+		if !isPunct(i+1, ":") {
 			continue
 		}
 		if val := tokens[i+2]; val.kind == tokString && val.text == "export" {

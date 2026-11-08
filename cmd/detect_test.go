@@ -495,6 +495,12 @@ func TestNextConditionalOutputExportIsNotStatic(t *testing.T) {
 		"module.exports = {\n  ...(process.env.PAGES && { output: 'export' }),\n}",
 		"const config = process.env.PAGES ? { output: 'export' } : {}\nexport default config",
 		"export default { images: { output: 'export' } }",
+		"module.exports = (phase) => {\n  if (process.env.PAGES) return { output: 'export' }\n  return {}\n}",
+		"module.exports = () => {\n  if (process.env.PAGES) {\n    return { output: 'export' }\n  }\n  return {}\n}",
+		"let config = {}\nif (process.env.PAGES) config = { output: 'export' };\nmodule.exports = config",
+		"module.exports = () => {\n  if (a) return {}\n  else return { output: 'export' }\n}",
+		"module.exports = () => {\n  switch (process.env.MODE) {\n    case 'pages':\n      return { output: 'export' }\n  }\n  return {}\n}",
+		"let config = {}\nfor (const k of keys) config = { output: 'export' }\nmodule.exports = config",
 	}
 	for _, cfg := range ssrConfigs {
 		dir := t.TempDir()
@@ -509,6 +515,11 @@ func TestNextConditionalOutputExportIsNotStatic(t *testing.T) {
 		"module.exports = withBundleAnalyzer({ output: 'export' })",
 		"const nextConfig: NextConfig = {\n  reactStrictMode: true,\n  output: 'export',\n}\nexport default nextConfig",
 		"module.exports = { env: { A: process.env.A ? 'x' : 'y' }, output: 'export' }",
+		"module.exports = (phase) => {\n  return { output: 'export' }\n}",
+		"function config() {\n  return { output: 'export' }\n}\nmodule.exports = config",
+		"module.exports = (phase) => {\n  if (phase === 'dev') return { reactStrictMode: true }\n  return { output: 'export' }\n}",
+		"module.exports = (phase) => {\n  if (phase === 'dev') { return {} }\n  return { output: 'export' }\n}",
+		"if (process.env.ANALYZE) require('x');\nmodule.exports = { output: 'export' }",
 	}
 	for _, cfg := range staticConfigs {
 		dir := t.TempDir()
